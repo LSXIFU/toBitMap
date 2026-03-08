@@ -62,7 +62,6 @@ npx serve .
 - ❌ 禁止商用
 - 📝 转载请注明原作者
 
-详见 [LICENSE](LICENSE) 文件。
 
 ## 作者信息
 
