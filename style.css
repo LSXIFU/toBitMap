@@ -351,7 +351,7 @@ h3 {
     background-color: #f44336;
 }
 
-#export-btn, #refresh-btn {
+#export-btn, #refresh-btn, #export-raw-btn {
     padding: 10px 20px;
     background-color: #4CAF50;
     color: white;
@@ -361,7 +361,7 @@ h3 {
     font-size: 16px;
 }
 
-#export-btn:hover, #refresh-btn:hover {
+#export-btn:hover, #refresh-btn:hover, #export-raw-btn:hover {
     background-color: #45a049;
 }
 

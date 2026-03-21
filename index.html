@@ -344,10 +344,15 @@ Github：LSXIFU
                 </div>
             </div>
             
-            <div style="display: flex; gap: 10px;">
+            <div style="display: flex; gap: 10px; align-items: center;">
                 <button id="refresh-btn">刷新</button>
-                <button id="export-btn">导出</button>
+                <button id="export-btn">导出C代码</button>
+                <button id="export-raw-btn">导出Raw文件</button>
                 <button id="cancel-export-btn" style="display: none; background-color: #f44336; color: white;">终止导出</button>
+                <div class="setting-group" style="margin-bottom: 0; margin-left: 10px;">
+                    <input type="checkbox" id="reverse-bits">
+                    <label for="reverse-bits">反转位序（修复画面错位问题）</label>
+                </div>
             </div>
             <div id="export-progress" style="display: none; margin-top: 10px; padding: 10px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9;">
                 <p>正在转换视频...请稍候</p>
