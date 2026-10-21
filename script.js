@@ -2303,13 +2303,13 @@ function toggleOriginalRatioLock(mode) {
             const sourceElement = mode === 'image' ? getElement('source-preview') : getElement('video-preview');
             
             const currentRect = selectionBox.getBoundingClientRect();
-            const sourceRect = sourceElement.getBoundingClientRect();
-            
-            const boxLeft = currentRect.left - sourceRect.left;
-            const boxTop = currentRect.top - sourceRect.top;
+            const containerRect = sourceElement.parentElement.getBoundingClientRect();
+
+            const boxLeft = currentRect.left - containerRect.left;
+            const boxTop = currentRect.top - containerRect.top;
             const boxWidth = currentRect.width;
             const boxHeight = currentRect.height;
-            
+
             let newWidth, newHeight;
             if (originalRatio > 1) {
                 newWidth = boxWidth;
@@ -2355,13 +2355,15 @@ function makeSelectionSquare(mode) {
     const sourceElement = mode === 'image' ? getElement('source-preview') : getElement('video-preview');
     
     const currentRect = selectionBox.getBoundingClientRect();
-    const sourceRect = sourceElement.getBoundingClientRect();
-    
-    const boxLeft = currentRect.left - sourceRect.left;
-    const boxTop = currentRect.top - sourceRect.top;
+    // 写 style 的坐标系是 container，不是 canvas：用 canvas 当原点会让整块框平移
+    // （每点一次 1:1 就往左上跳一次，实测顶边 54.5 → 23.3）
+    const containerRect = sourceElement.parentElement.getBoundingClientRect();
+
+    const boxLeft = currentRect.left - containerRect.left;
+    const boxTop = currentRect.top - containerRect.top;
     const boxWidth = currentRect.width;
     const boxHeight = currentRect.height;
-    
+
     const squareSize = Math.min(boxWidth, boxHeight);
     
     const newLeft = boxLeft + (boxWidth - squareSize) / 2;
@@ -2387,13 +2389,14 @@ function resizeSelection(mode, mouseX, mouseY) {
     const sourceElement = mode === 'image' ? getElement('source-preview') : getElement('video-preview');
     
     const currentRect = selectionBox.getBoundingClientRect();
-    const sourceRect = sourceElement.getBoundingClientRect();
-    
-    const boxLeft = currentRect.left - sourceRect.left;
-    const boxTop = currentRect.top - sourceRect.top;
+    // mouseX/mouseY 是容器坐标，box 也必须换成容器坐标，否则拖手柄会整体偏一个 origin
+    const containerRect = sourceElement.parentElement.getBoundingClientRect();
+
+    const boxLeft = currentRect.left - containerRect.left;
+    const boxTop = currentRect.top - containerRect.top;
     const boxWidth = currentRect.width;
     const boxHeight = currentRect.height;
-    
+
     if (modeStates[mode].isRatioLocked) {
         resizeSelectionLocked(mode, mouseX, mouseY, boxLeft, boxTop, boxWidth, boxHeight);
     } else if (modeStates[mode].isOriginalRatioLocked) {
@@ -2629,11 +2632,19 @@ function moveSelection(mode, mouseX, mouseY) {
     const boxWidth = selectionBox.offsetWidth;
     const boxHeight = selectionBox.offsetHeight;
     
+    // 选区 style.left/top 是「相对 container」的坐标，而 canvas 在 container 里
+    // 还偏了内边距(≈9px) + canvas 标签高度(≈31px)。原来拿 canvas.offsetWidth 当上界，
+    // 于是右边和下边永远差这一截够不着（实测 100×100 图只能夹到 right=97.6 / bottom=91.1）。
+    const canvasRect = sourceElement.getBoundingClientRect();
+    const containerRect = sourceElement.parentElement.getBoundingClientRect();
+    const minLeft = canvasRect.left - containerRect.left;
+    const minTop = canvasRect.top - containerRect.top;
+
     let newLeft = mouseX - dragOffset.x;
     let newTop = mouseY - dragOffset.y;
-    
-    newLeft = Math.max(0, Math.min(newLeft, sourceElement.offsetWidth - boxWidth));
-    newTop = Math.max(0, Math.min(newTop, sourceElement.offsetHeight - boxHeight));
+
+    newLeft = Math.max(minLeft, Math.min(newLeft, minLeft + canvasRect.width - boxWidth));
+    newTop = Math.max(minTop, Math.min(newTop, minTop + canvasRect.height - boxHeight));
     
     selectionBox.style.left = newLeft + 'px';
     selectionBox.style.top = newTop + 'px';
