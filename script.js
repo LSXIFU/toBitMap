@@ -431,27 +431,62 @@ class WebGLImageProcessor {
     
     processBinary(imageData, thresholdType, threshold, rgbThresholds, invert) {
         if (!this.initialized) {
-            return binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, invert);
+            return binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, invert, 'none');
         }
         
         const gl = this.gl;
         const width = imageData.width;
         const height = imageData.height;
         
-        gl.canvas.width = width;
-        gl.canvas.height = height;
+        if (gl.canvas.width !== width || gl.canvas.height !== height) {
+            gl.canvas.width = width;
+            gl.canvas.height = height;
+        }
         gl.viewport(0, 0, width, height);
         
-        const texture = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, imageData);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        
+        const resources = this._ensureResources();
         const program = this.programs.binary;
         gl.useProgram(program);
+        
+        gl.bindTexture(gl.TEXTURE_2D, resources.texture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, imageData);
+        
+        gl.bindBuffer(gl.ARRAY_BUFFER, resources.positionBuffer);
+        gl.enableVertexAttribArray(resources.positionLoc);
+        gl.vertexAttribPointer(resources.positionLoc, 2, gl.FLOAT, false, 0, 0);
+        
+        gl.bindBuffer(gl.ARRAY_BUFFER, resources.texCoordBuffer);
+        gl.enableVertexAttribArray(resources.texCoordLoc);
+        gl.vertexAttribPointer(resources.texCoordLoc, 2, gl.FLOAT, false, 0, 0);
+        
+        const u = resources.uniforms;
+        gl.uniform1i(u.image, 0);
+        gl.uniform1f(u.threshold, threshold / 255);
+        gl.uniform1i(u.thresholdType, thresholdTypeToIndex(thresholdType));
+        gl.uniform1f(u.redMin, parseInt(rgbThresholds.redMin) / 255);
+        gl.uniform1f(u.redMax, parseInt(rgbThresholds.redMax) / 255);
+        gl.uniform1f(u.greenMin, parseInt(rgbThresholds.greenMin) / 255);
+        gl.uniform1f(u.greenMax, parseInt(rgbThresholds.greenMax) / 255);
+        gl.uniform1f(u.blueMin, parseInt(rgbThresholds.blueMin) / 255);
+        gl.uniform1f(u.blueMax, parseInt(rgbThresholds.blueMax) / 255);
+        gl.uniform1i(u.invert, invert ? 1 : 0);
+        
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        
+        // 纹理坐标与 clip 空间同向（v=0 在 y=-1），readPixels 第一行就是图像顶行，
+        // 不需要再翻一次 —— 原来着色器翻一次、JS 再逐像素翻一次，白算 O(w*h)。
+        const pixels = new Uint8Array(width * height * 4);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        
+        return new ImageData(new Uint8ClampedArray(pixels.buffer), width, height);
+    }
+    
+    // 纹理、顶点缓冲、uniform 位置只在首次使用时创建，别每次调用都 new + delete
+    _ensureResources() {
+        if (this._resources) return this._resources;
+        
+        const gl = this.gl;
+        const program = this.programs.binary;
         
         const positionBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -460,54 +495,41 @@ class WebGLImageProcessor {
             -1, 1, 1, -1, 1, 1
         ]), gl.STATIC_DRAW);
         
-        const positionLoc = gl.getAttribLocation(program, 'a_position');
-        gl.enableVertexAttribArray(positionLoc);
-        gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
-        
         const texCoordBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-            0, 1, 1, 1, 0, 0,
-            0, 0, 1, 1, 1, 0
+            0, 0, 1, 0, 0, 1,
+            0, 1, 1, 0, 1, 1
         ]), gl.STATIC_DRAW);
         
-        const texCoordLoc = gl.getAttribLocation(program, 'a_texCoord');
-        gl.enableVertexAttribArray(texCoordLoc);
-        gl.vertexAttribPointer(texCoordLoc, 2, gl.FLOAT, false, 0, 0);
+        const texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
         
-        gl.uniform1i(gl.getUniformLocation(program, 'u_image'), 0);
-        gl.uniform1f(gl.getUniformLocation(program, 'u_threshold'), threshold / 255);
-        gl.uniform1i(gl.getUniformLocation(program, 'u_thresholdType'), thresholdTypeToIndex(thresholdType));
-        gl.uniform1f(gl.getUniformLocation(program, 'u_redMin'), parseInt(rgbThresholds.redMin) / 255);
-        gl.uniform1f(gl.getUniformLocation(program, 'u_redMax'), parseInt(rgbThresholds.redMax) / 255);
-        gl.uniform1f(gl.getUniformLocation(program, 'u_greenMin'), parseInt(rgbThresholds.greenMin) / 255);
-        gl.uniform1f(gl.getUniformLocation(program, 'u_greenMax'), parseInt(rgbThresholds.greenMax) / 255);
-        gl.uniform1f(gl.getUniformLocation(program, 'u_blueMin'), parseInt(rgbThresholds.blueMin) / 255);
-        gl.uniform1f(gl.getUniformLocation(program, 'u_blueMax'), parseInt(rgbThresholds.blueMax) / 255);
-        gl.uniform1i(gl.getUniformLocation(program, 'u_invert'), invert ? 1 : 0);
-        
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
-        
-        const outputData = new Uint8Array(width * height * 4);
-        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, outputData);
-        
-        gl.deleteTexture(texture);
-        gl.deleteBuffer(positionBuffer);
-        gl.deleteBuffer(texCoordBuffer);
-        
-        const resultData = new Uint8ClampedArray(width * height * 4);
-        for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x++) {
-                const srcIdx = ((height - 1 - y) * width + x) * 4;
-                const dstIdx = (y * width + x) * 4;
-                resultData[dstIdx] = outputData[srcIdx];
-                resultData[dstIdx + 1] = outputData[srcIdx + 1];
-                resultData[dstIdx + 2] = outputData[srcIdx + 2];
-                resultData[dstIdx + 3] = 255;
+        this._resources = {
+            positionBuffer: positionBuffer,
+            texCoordBuffer: texCoordBuffer,
+            texture: texture,
+            positionLoc: gl.getAttribLocation(program, 'a_position'),
+            texCoordLoc: gl.getAttribLocation(program, 'a_texCoord'),
+            uniforms: {
+                image: gl.getUniformLocation(program, 'u_image'),
+                threshold: gl.getUniformLocation(program, 'u_threshold'),
+                thresholdType: gl.getUniformLocation(program, 'u_thresholdType'),
+                redMin: gl.getUniformLocation(program, 'u_redMin'),
+                redMax: gl.getUniformLocation(program, 'u_redMax'),
+                greenMin: gl.getUniformLocation(program, 'u_greenMin'),
+                greenMax: gl.getUniformLocation(program, 'u_greenMax'),
+                blueMin: gl.getUniformLocation(program, 'u_blueMin'),
+                blueMax: gl.getUniformLocation(program, 'u_blueMax'),
+                invert: gl.getUniformLocation(program, 'u_invert')
             }
-        }
+        };
         
-        return new ImageData(resultData, width, height);
+        return this._resources;
     }
     
     isAvailable() {
