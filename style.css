@@ -900,3 +900,44 @@ input[type="range"] {
         align-items: flex-start;
     }
 }
+
+/* ---------- 反导入 ---------- */
+
+.import-textarea {
+    width: 100%;
+    min-height: 64px;
+    padding: 8px 10px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    resize: vertical;
+}
+
+.import-textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.import-preview {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+    padding: 12px;
+    min-height: 72px;
+    background: var(--surface-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+#import-canvas {
+    display: none;
+    max-width: 100%;
+    image-rendering: pixelated;
+    background: #000;
+    border: 1px solid var(--border-strong);
+}

@@ -552,6 +552,138 @@ let currentVideo = null;
 let rafId = null;
 let pendingProcess = null;
 
+
+// ===== 位图布局（同一张图的多种落位方式）=====
+// 权威表示：逻辑位图 B[y][x]，1 = 置位（亮）。所有输出格式都只是它的不同落位，
+// 用 (axis, bitOrder) 两个参数描述，不为每种格式写一份循环：
+//   row  -> 每字节 8 个水平像素，外层按行：y*ceil(W/8) + (x>>3)
+//   page -> 每字节 8 个垂直像素，外层按页：(y>>3)*W + x      （SSD1306 GDDRAM 页结构）
+//   col  -> 每字节 8 个垂直像素，外层按列：x*ceil(H/8) + (y>>3)
+// page 与 col 的字节内部构造完全相同（8 竖像素 + LSB 在顶），只差外层遍历顺序。
+const BITMAP_LAYOUTS = {
+    row_msb: { axis: 'row', bitOrder: 'msb', label: '行优先 MSB', hint: 'Adafruit_GFX / U8g2 drawXBMP' },
+    row_lsb: { axis: 'row', bitOrder: 'lsb', label: '行优先 LSB', hint: '老控制器 / ST7920 类' },
+    page_lsb: { axis: 'page', bitOrder: 'lsb', label: '页模式 LSB', hint: 'SSD1306 / SH1106 全屏缓冲' },
+    col_lsb: { axis: 'col', bitOrder: 'lsb', label: '列优先 LSB', hint: '竖排缓冲 / 列字节点阵' }
+};
+
+const DEFAULT_LAYOUT = 'row_msb';
+
+function getLayout(layoutId) {
+    return BITMAP_LAYOUTS[layoutId] || BITMAP_LAYOUTS[DEFAULT_LAYOUT];
+}
+
+// 导出用：读到什么用什么，读到脏值回落默认布局，绝不静默落到别的格式
+function getOutputLayout() {
+    const select = document.getElementById('output-format');
+    if (select && BITMAP_LAYOUTS[select.value]) return select.value;
+    return DEFAULT_LAYOUT;
+}
+
+// 权威缓冲（行优先 MSB）的字节数
+function canonicalBufferSize(width, height) {
+    return Math.ceil(width / 8) * height;
+}
+
+// 指定布局的字节数：row -> H*ceil(W/8)；page -> ceil(H/8)*W；col -> W*ceil(H/8)
+function layoutBufferSize(width, height, layoutId) {
+    const axis = getLayout(layoutId).axis;
+    const hBytes = Math.ceil(width / 8);
+    const vBytes = Math.ceil(height / 8);
+    if (axis === 'row') return hBytes * height;
+    if (axis === 'page') return vBytes * width;
+    return width * vBytes;
+}
+
+// 位搬运的唯一实现。srcIsCanonical = true 时把权威缓冲铺进目标布局（encode），
+// false 时把目标布局解回权威缓冲（decode）。两个方向共用同一组位置公式，改布局只改这里。
+// padding 位永远保持 0：只有「有意义的位」被搬运。
+function transferBits(src, width, height, layoutId, srcIsCanonical) {
+    const layout = getLayout(layoutId);
+    const hBytes = Math.ceil(width / 8);
+    const vBytes = Math.ceil(height / 8);
+    const msb = layout.bitOrder === 'msb';
+    const out = new Uint8Array(
+        srcIsCanonical ? layoutBufferSize(width, height, layoutId) : hBytes * height
+    );
+
+    for (let y = 0; y < height; y++) {
+        const rowBase = y * hBytes;
+        const vPage = y >> 3;
+        const vBit = msb ? 7 - (y & 7) : (y & 7);
+
+        for (let x = 0; x < width; x++) {
+            const cIndex = rowBase + (x >> 3);
+            const cBit = 7 - (x & 7);
+            let index = cIndex;
+            let bit = msb ? 7 - (x & 7) : (x & 7);
+
+            if (layout.axis === 'page') {
+                index = vPage * width + x;
+                bit = vBit;
+            } else if (layout.axis === 'col') {
+                index = x * vBytes + vPage;
+                bit = vBit;
+            }
+
+            if (srcIsCanonical) {
+                if (!((src[cIndex] >> cBit) & 1)) continue;
+                out[index] |= 1 << bit;
+            } else {
+                if (!((src[index] >> bit) & 1)) continue;
+                out[cIndex] |= 1 << cBit;
+            }
+        }
+    }
+
+    return out;
+}
+
+// 图像 -> 指定布局位流。二值化只发生在 packBitmapBytes（权威缓冲）里，一次。
+function encodeBitmap(imageData, layoutId) {
+    const canonical = packBitmapBytes(imageData);
+    if (!layoutId || layoutId === DEFAULT_LAYOUT) return canonical;
+    return transferBits(canonical, imageData.width, imageData.height, layoutId, true);
+}
+
+// 位流 -> 权威缓冲（反导入用）。长度不足按 0 补齐，超长部分忽略。
+function decodeBitmap(bytes, width, height, layoutId) {
+    const expected = layoutBufferSize(width, height, layoutId);
+    let source = bytes;
+    if (bytes.length !== expected) {
+        source = new Uint8Array(expected);
+        source.set(bytes.subarray(0, Math.min(bytes.length, expected)));
+    }
+    if (!layoutId || layoutId === DEFAULT_LAYOUT) {
+        const out = new Uint8Array(canonicalBufferSize(width, height));
+        out.set(source.subarray(0, Math.min(source.length, out.length)));
+        return out;
+    }
+    return transferBits(source, width, height, layoutId, false);
+}
+
+// 权威缓冲 -> 可画的 ImageData（1 = 白 = 置位）
+function canonicalToImageData(canonical, width, height) {
+    const imageData = new ImageData(width, height);
+    const data = imageData.data;
+    const hBytes = Math.ceil(width / 8);
+
+    for (let y = 0; y < height; y++) {
+        const rowBase = y * hBytes;
+        for (let x = 0; x < width; x++) {
+            const on = (canonical[rowBase + (x >> 3)] >> (7 - (x & 7))) & 1;
+            const value = on ? 255 : 0;
+            const offset = (y * width + x) * 4;
+            data[offset] = value;
+            data[offset + 1] = value;
+            data[offset + 2] = value;
+            data[offset + 3] = 255;
+        }
+    }
+
+    return imageData;
+}
+
 function reverseBits(byte) {
     let result = 0;
     for (let i = 0; i < 8; i++) {
@@ -560,8 +692,8 @@ function reverseBits(byte) {
     return result;
 }
 
-// 唯一的位打包实现（原来散在 5 处）：行优先、MSB 在前。
-// reverseBitOrder 整体翻转位序，对应 LSB 在前的屏幕。
+// 唯一的二值化实现：图像 -> 权威缓冲（行优先 MSB）。布局落位在 transferBits 里做。
+// reverseBitOrder 是历史兼容参数（等价 row_lsb）；新代码走 encodeBitmap(imageData, layoutId)。
 function packBitmapBytes(imageData, reverseBitOrder = false) {
     const width = imageData.width;
     const height = imageData.height;
@@ -593,6 +725,10 @@ function formatCHeader(bytes, options) {
     const { width, height, arrayName, widthVar, heightVar } = options;
     const lines = [];
     
+    if (options.layoutId) {
+        const layout = getLayout(options.layoutId);
+        lines.push(`// layout: ${layout.label} (${layout.hint}) ${width}x${height} ${bytes.length}B`);
+    }
     lines.push(`#define ${widthVar.toUpperCase()} ${width}`);
     lines.push(`#define ${heightVar.toUpperCase()} ${height}`);
     lines.push(`static const unsigned char ${arrayName}[] PROGMEM = {`);
@@ -1097,7 +1233,8 @@ function generateCode(imageData, width, height) {
     modeStates[activeMode].widthVar = options.widthVar;
     modeStates[activeMode].heightVar = options.heightVar;
     
-    const code = formatCHeader(packBitmapBytes(imageData), options);
+    options.layoutId = getOutputLayout();
+    const code = formatCHeader(encodeBitmap(imageData, options.layoutId), options);
     
     // 内容没变就不碰 DOM：滑杆拖动时每帧重写整段文本会强制重排
     if (code !== modeStates[activeMode].resultCode) {
@@ -1137,10 +1274,10 @@ function updateResultStats(width, height) {
     const stats = getElement('result-stats');
     if (!stats) return;
     
-    const bytesPerRow = Math.ceil(width / 8);
-    const totalBytes = bytesPerRow * height;
     const sourceKB = (modeStates[activeMode].resultCode.length / 1024).toFixed(1);
-    const text = `${width}×${height} · ${bytesPerRow} B/行 · 共 ${totalBytes} B · 源码 ${sourceKB} KB · 行优先 MSB`;
+    const layoutId = getOutputLayout();
+    const layout = getLayout(layoutId);
+    const text = `${width}×${height} · ${layout.label} · 共 ${layoutBufferSize(width, height, layoutId)} B · 源码 ${sourceKB} KB`;
     
     // 统计跟模式走：切 Tab 后不能还挂着上一个模式的尺寸
     modeStates[activeMode].resultStats = text;
@@ -2367,7 +2504,10 @@ function setupEventListeners() {
     
     getElement('frame-rate').addEventListener('change', processVideo);
     
-    getElement('reverse-bits').addEventListener('change', refreshCodeNow);
+    getElement('output-format').addEventListener('change', function() {
+        refreshCodeNow();
+        if (lastRender) updateResultStats(lastRender.width, lastRender.height);
+    });
     
     getElement('copy-code-btn').addEventListener('click', copyResultCode);
     
@@ -2432,6 +2572,8 @@ function setupEventListeners() {
     getElement('draw-height').addEventListener('input', resizeDrawCanvas);
     
     getElement('draw-invert-checkbox').addEventListener('change', processDrawCanvas);
+    
+    setupImportPanel();
 }
 
 function showPrevImage() {
@@ -2535,6 +2677,7 @@ function exportVideo() {
     let currentZipFrames = [];
     let allZipBlobs = [];
     let previousFrameData = null;
+    const layoutId = getOutputLayout();
     
     // 上一次导出被中断可能留下占用标记，先清干净
     canvasPool.releaseAll();
@@ -2589,7 +2732,8 @@ function exportVideo() {
             }
             
             if (shouldAddFrame) {
-                const code = formatCHeader(packBitmapBytes(processedImageData), {
+                const code = formatCHeader(encodeBitmap(processedImageData, layoutId), {
+                    layoutId: layoutId,
                     width: width,
                     height: height,
                     arrayName: getElement('array-name').value || 'image_bits',
@@ -2731,9 +2875,9 @@ function exportRawImage() {
         });
     }
     
-    const reverseBits = getElement('reverse-bits').checked;
+    const layoutId = getOutputLayout();
     
-    const bytes = packBitmapBytes(imageData, reverseBits);
+    const bytes = encodeBitmap(imageData, layoutId);
     
     const totalFrames = 1;
     const fps = 10;
@@ -2755,7 +2899,7 @@ function exportRawImage() {
     a.click();
     URL.revokeObjectURL(url);
     
-    alert(`Raw文件导出完成\n文件名：\n- 分辨率：${width}x${height}\n- 帧数：${totalFrames}\n- 帧率：${fps}fps\n- 位序反转：${reverseBits ? '是' : '否'}`);
+    alert(`Raw文件导出完成\n文件名：\n- 分辨率：${width}x${height}\n- 帧数：${totalFrames}\n- 帧率：${fps}fps\n- 输出格式：${getLayout(layoutId).label}`);
 }
 
 function exportRawVideo() {
@@ -2792,7 +2936,7 @@ function exportRawVideo() {
     let allFrameData = [];
     let previousFrameBytes = null;
     
-    const reverseBits = getElement('reverse-bits').checked;
+    const layoutId = getOutputLayout();
     
     canvasPool.releaseAll();
     const tempCanvasItem = canvasPool.acquire(width, height);
@@ -2808,7 +2952,7 @@ function exportRawVideo() {
         }
         
         if (currentFrame >= totalFrames) {
-            finishRawExport(width, height, frameRate, allFrameData, reverseBits, tempCanvasItem);
+            finishRawExport(width, height, frameRate, allFrameData, layoutId, tempCanvasItem);
             return;
         }
         
@@ -2823,7 +2967,7 @@ function exportRawVideo() {
             const processedImageData = processBinaryImage(
                 imageData, thresholdType, threshold, readRgbThresholds('video-'), invert, readDitherMode('video-')
             );
-            const frameBytes = packBitmapBytes(processedImageData, reverseBits);
+            const frameBytes = encodeBitmap(processedImageData, layoutId);
             
             let shouldAddFrame = true;
             
@@ -2855,7 +2999,7 @@ function exportRawVideo() {
     processNextRawFrame();
 }
 
-function finishRawExport(width, height, fps, allFrameData, reverseBits, tempCanvasItem) {
+function finishRawExport(width, height, fps, allFrameData, layoutId, tempCanvasItem) {
     if (tempCanvasItem) {
         canvasPool.release(tempCanvasItem);
     }
@@ -2895,7 +3039,366 @@ function finishRawExport(width, height, fps, allFrameData, reverseBits, tempCanv
     getElement('cancel-export-btn').style.display = 'none';
     getElement('export-progress').style.display = 'none';
     
-    alert(`Raw视频导出完成！\n\n- 分辨率：${width}x${height}\n- 帧数：${totalFrames}\n- 帧率：${fps}fps\n- 位序反转：${reverseBits ? '是' : '否'}`);
+    alert(`Raw视频导出完成！\n\n- 分辨率：${width}x${height}\n- 帧数：${totalFrames}\n- 帧率：${fps}fps\n- 输出格式：${getLayout(layoutId).label}`);
 }
+
+
+// ===== 反导入：位流 -> 预览（自检闭环）=====
+// 判据不是「字节好看」，而是能不能解回来看到图：格式选错时预览立刻错位/成雪花。
+const importState = {
+    bytes: null,
+    payload: null,
+    width: 0,
+    height: 0,
+    frames: 0,
+    fps: 0,
+    frame: 0,
+    frameSize: 0,
+    layoutId: DEFAULT_LAYOUT,
+    note: ''
+};
+
+function getImportLayout() {
+    const select = document.getElementById('import-format');
+    if (select && BITMAP_LAYOUTS[select.value]) return select.value;
+    return DEFAULT_LAYOUT;
+}
+
+// 接受 0xNN 形式，或去掉分隔符后成对的十六进制
+function parseHexByteStream(text) {
+    const bytes = [];
+    const prefixed = text.match(/0x[0-9a-fA-F]{1,2}/g);
+    if (prefixed) {
+        prefixed.forEach(token => bytes.push(parseInt(token.slice(2), 16)));
+        return new Uint8Array(bytes);
+    }
+    const cleaned = text.replace(/[^0-9a-fA-F]/g, '');
+    for (let i = 0; i + 1 < cleaned.length; i += 2) {
+        bytes.push(parseInt(cleaned.substr(i, 2), 16));
+    }
+    return new Uint8Array(bytes);
+}
+
+function readRawHeader(bytes) {
+    if (bytes.length < 12) return null;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const frames = view.getUint32(0, true);
+    const fps = view.getUint32(4, true);
+    const width = view.getUint16(8, true);
+    const height = view.getUint16(10, true);
+    if (!width || !height) return null;
+    if (width > AppConfig.maxBitmapSize || height > AppConfig.maxBitmapSize) return null;
+    return { frames: frames, fps: fps, width: width, height: height };
+}
+
+function updateImportPreview() {
+    const canvas = getElement('import-canvas');
+    const empty = getElement('import-empty');
+    const stats = getElement('import-stats');
+    const state = importState;
+
+    if (!state.bytes || !state.frames) {
+        canvas.style.display = 'none';
+        empty.style.display = 'inline';
+        stats.textContent = '';
+        return;
+    }
+
+    const offset = state.frame * state.frameSize;
+    const slice = state.payload.subarray(offset, offset + state.frameSize);
+    const canonical = decodeBitmap(slice, state.width, state.height, state.layoutId);
+    const imageData = canonicalToImageData(canonical, state.width, state.height);
+
+    canvas.width = state.width;
+    canvas.height = state.height;
+    canvas.getContext('2d').putImageData(imageData, 0, 0);
+
+    // 整数倍放大，保持像素锐利
+    const scale = Math.max(1, Math.min(8, Math.floor(480 / Math.max(state.width, state.height))));
+    canvas.style.width = state.width * scale + 'px';
+    canvas.style.height = state.height * scale + 'px';
+    canvas.style.display = 'block';
+    empty.style.display = 'none';
+
+    let setBits = 0;
+    for (let i = 0; i < canonical.length; i++) {
+        let byte = canonical[i];
+        while (byte) {
+            setBits += byte & 1;
+            byte >>= 1;
+        }
+    }
+
+    const layout = getLayout(state.layoutId);
+    stats.textContent = `${state.width}×${state.height} · ${layout.label} · 每帧 ${state.frameSize} B`
+        + ` · 第 ${state.frame + 1}/${state.frames} 帧`
+        + ` · 有效位 ${state.width * state.height} / 位流 ${state.frameSize * 8}`
+        + ` · 置位 ${setBits}`
+        + (state.note ? ` · ${state.note}` : '');
+}
+
+// 会被文件、粘贴、切格式、改宽高四条路径复用，所以统一收在这里
+function loadImportedData(bytes, layoutId, forcedWidth, forcedHeight) {
+    if (!bytes || !bytes.length) {
+        alert('没有可解析的数据');
+        return;
+    }
+
+    const header = readRawHeader(bytes);
+    const state = importState;
+    let payload = bytes;
+    let width = 0;
+    let height = 0;
+    let fps = 0;
+    let note = '';
+
+    if (header) {
+        payload = bytes.subarray(12);
+        width = header.width;
+        height = header.height;
+        fps = header.fps;
+        if (header.frames && header.frames !== Math.floor(payload.length / layoutBufferSize(width, height, layoutId))) {
+            note = `头声明 ${header.frames} 帧`;
+        }
+    } else {
+        width = forcedWidth || parseInt(getElement('import-width').value) || 0;
+        height = forcedHeight || parseInt(getElement('import-height').value) || 0;
+        if (!width || !height) {
+            alert('没读到 .raw 头（12 字节：帧数/帧率/宽/高）。\n请填宽高，或确认导入的是本工具导出的 .raw。');
+            return;
+        }
+    }
+
+    width = Math.max(1, Math.min(AppConfig.maxBitmapSize, width));
+    height = Math.max(1, Math.min(AppConfig.maxBitmapSize, height));
+
+    const frameSize = layoutBufferSize(width, height, layoutId);
+    const frames = Math.floor(payload.length / frameSize);
+    const layout = getLayout(layoutId);
+
+    if (frames < 1) {
+        alert(`数据不足：一个 ${width}×${height} 的「${layout.label}」帧需要 ${frameSize} 字节，`
+            + `实际只有 ${payload.length} 字节。\n多半是格式选错了，或宽高填错了。`);
+        return;
+    }
+
+    state.bytes = bytes;
+    state.payload = payload;
+    state.width = width;
+    state.height = height;
+    state.frames = frames;
+    state.fps = fps;
+    state.frame = 0;
+    state.frameSize = frameSize;
+    state.layoutId = layoutId;
+    state.note = note;
+
+    getElement('import-width').value = width;
+    getElement('import-height').value = height;
+    updateImportPreview();
+}
+
+function stepImportFrame(delta) {
+    if (!importState.frames) return;
+    importState.frame = (importState.frame + delta + importState.frames) % importState.frames;
+    updateImportPreview();
+}
+
+function readImportFile(file) {
+    const name = (file.name || '').toLowerCase();
+    if (/\.(h|c|txt|hex)$/.test(name)) {
+        const reader = new FileReader();
+        reader.onload = function() {
+            const bytes = parseHexByteStream(String(reader.result || ''));
+            if (!bytes.length) {
+                alert('文件里没有找到十六进制字节（需要 0xNN）');
+                return;
+            }
+            loadImportedData(bytes, getImportLayout(), 0, 0);
+        };
+        reader.readAsText(file);
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = function() {
+        loadImportedData(new Uint8Array(reader.result), getImportLayout(), 0, 0);
+    };
+    reader.readAsArrayBuffer(file);
+}
+
+function setupImportPanel() {
+    getElement('import-file').addEventListener('change', function(e) {
+        const file = e.target.files && e.target.files[0];
+        if (file) readImportFile(file);
+    });
+
+    getElement('import-btn').addEventListener('click', function() {
+        const hex = getElement('import-hex').value;
+        if (hex.trim()) {
+            const bytes = parseHexByteStream(hex);
+            if (!bytes.length) {
+                alert('没有解析出字节：需要 0xNN 或成对的十六进制');
+                return;
+            }
+            loadImportedData(bytes, getImportLayout(), 0, 0);
+            return;
+        }
+
+        const file = getElement('import-file').files && getElement('import-file').files[0];
+        if (!file) {
+            alert('先选择文件，或粘贴字节流');
+            return;
+        }
+        readImportFile(file);
+    });
+
+    // 切格式 / 改宽高都重新解一遍：格式选错时预览会立刻变样，这就是判据
+    getElement('import-format').addEventListener('change', function() {
+        if (importState.bytes) loadImportedData(importState.bytes, getImportLayout(), 0, 0);
+    });
+
+    ['import-width', 'import-height'].forEach(function(id) {
+        getElement(id).addEventListener('change', function() {
+            if (importState.bytes && !readRawHeader(importState.bytes)) {
+                loadImportedData(importState.bytes, getImportLayout(), 0, 0);
+            }
+        });
+    });
+
+    getElement('import-prev-btn').addEventListener('click', function() { stepImportFrame(-1); });
+    getElement('import-next-btn').addEventListener('click', function() { stepImportFrame(1); });
+}
+
+// ===== 回归预言机：布局自洽 + 跨格式等价 =====
+// 判据不是「字节相同」（不同布局字节本来就不同），而是「解码回权威缓冲后逐字节相同」。
+function makeTestCanonical(width, height, pattern) {
+    const canonical = new Uint8Array(canonicalBufferSize(width, height));
+    const hBytes = Math.ceil(width / 8);
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            let on = false;
+            if (pattern === 'leftBlack') on = x >= width / 2;
+            else if (pattern === 'topBlack') on = y >= height / 2;
+            else if (pattern === 'checker1') on = ((x + y) & 1) === 0;
+            else if (pattern === 'checker3') on = ((Math.floor(x / 3) + Math.floor(y / 3)) % 2) === 0;
+            else if (pattern === 'allOn') on = true;
+            if (!on) continue;
+            canonical[y * hBytes + (x >> 3)] |= 1 << (7 - (x & 7));
+        }
+    }
+
+    return canonical;
+}
+
+function runBitmapSelfTest() {
+    const layouts = Object.keys(BITMAP_LAYOUTS);
+    const shapes = [[64, 64], [128, 64], [37, 23], [9, 9], [1, 1], [64, 9], [8, 8], [1, 37]];
+    const patterns = ['leftBlack', 'topBlack', 'checker1', 'checker3', 'allOn'];
+    const failures = [];
+    let cases = 0;
+
+    for (const shape of shapes) {
+        const width = shape[0];
+        const height = shape[1];
+
+        for (const pattern of patterns) {
+            const canonical = makeTestCanonical(width, height, pattern);
+
+            for (const layoutId of layouts) {
+                cases++;
+                const expectedSize = layoutBufferSize(width, height, layoutId);
+                const encoded = transferBits(canonical, width, height, layoutId, true);
+
+                if (encoded.length !== expectedSize) {
+                    failures.push(`${layoutId} ${width}x${height} ${pattern}: 长度 ${encoded.length} != ${expectedSize}`);
+                    continue;
+                }
+
+                const decoded = transferBits(encoded, width, height, layoutId, false);
+                for (let i = 0; i < canonical.length; i++) {
+                    if (decoded[i] !== canonical[i]) {
+                        failures.push(`${layoutId} ${width}x${height} ${pattern}: 往返第 ${i} 字节不等`);
+                        break;
+                    }
+                }
+
+                // 跨格式：所有布局解回来必须是同一张图
+                const reference = transferBits(canonical, width, height, DEFAULT_LAYOUT, true);
+                if (reference.length !== canonical.length) {
+                    failures.push(`${DEFAULT_LAYOUT} ${width}x${height} ${pattern}: 权威长度不等`);
+                    break;
+                }
+                for (let i = 0; i < reference.length; i++) {
+                    if (decoded[i] !== reference[i]) {
+                        failures.push(`跨格式 ${layoutId} ${width}x${height} ${pattern}: 第 ${i} 字节不等`);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 位序黄金值：8x8 只点亮 (0,0)，row_msb 首位 0x80，row_lsb 首位 0x01
+    cases += 2;
+    const dot = new Uint8Array(canonicalBufferSize(8, 8));
+    dot[0] = 0x80;
+    const dotMsb = transferBits(dot, 8, 8, 'row_msb', true);
+    const dotLsb = transferBits(dot, 8, 8, 'row_lsb', true);
+    if (dotMsb[0] !== 0x80) failures.push(`row_msb (0,0) 应为 0x80，实际 0x${dotMsb[0].toString(16)}`);
+    if (dotLsb[0] !== 0x01) failures.push(`row_lsb (0,0) 应为 0x01，实际 0x${dotLsb[0].toString(16)}`);
+
+    // 页模式黄金值：128x64 单点 (5,11) -> 索引 (11>>3)*128+5 = 133，位 11&7 = 3
+    cases += 3;
+    const single = new Uint8Array(canonicalBufferSize(128, 64));
+    single[11 * 16 + (5 >> 3)] |= 1 << (7 - (5 & 7));
+    const pageBytes = transferBits(single, 128, 64, 'page_lsb', true);
+    if (pageBytes.length !== 1024) failures.push(`page_lsb 128x64 应为 1024 字节，实际 ${pageBytes.length}`);
+    if (pageBytes[133] !== 0x08) failures.push(`page_lsb (5,11) 应在字节 133 的 bit3，实际 0x${pageBytes[133].toString(16)}`);
+    let setBytes = 0;
+    for (let i = 0; i < pageBytes.length; i++) if (pageBytes[i]) setBytes++;
+    if (setBytes !== 1) failures.push(`page_lsb 单点应只占 1 个非零字节，实际 ${setBytes}`);
+
+    // 真实管线：ImageData -> 二值化 -> 页模式 -> 解回，与权威缓冲逐字节相等
+    cases += 2;
+    const pipelineWidth = 37;
+    const pipelineHeight = 23;
+    const image = new ImageData(pipelineWidth, pipelineHeight);
+    for (let y = 0; y < pipelineHeight; y++) {
+        for (let x = 0; x < pipelineWidth; x++) {
+            const value = x >= pipelineWidth / 2 ? 255 : 0;
+            const offset = (y * pipelineWidth + x) * 4;
+            image.data[offset] = value;
+            image.data[offset + 1] = value;
+            image.data[offset + 2] = value;
+            image.data[offset + 3] = 255;
+        }
+    }
+    const pipelineBytes = encodeBitmap(image, 'page_lsb');
+    const pipelineBack = decodeBitmap(pipelineBytes, pipelineWidth, pipelineHeight, 'page_lsb');
+    const pipelineRef = packBitmapBytes(image);
+    if (pipelineBytes.length !== layoutBufferSize(pipelineWidth, pipelineHeight, 'page_lsb')) {
+        failures.push('管线：页模式字节数不符');
+    }
+    for (let i = 0; i < pipelineRef.length; i++) {
+        if (pipelineBack[i] !== pipelineRef[i]) {
+            failures.push(`管线：第 ${i} 字节与权威缓冲不等`);
+            break;
+        }
+    }
+
+    return {
+        pass: failures.length === 0,
+        cases: cases,
+        layouts: layouts.length,
+        shapes: shapes.length,
+        patterns: patterns.length,
+        failures: failures
+    };
+}
+
+// 控制台里跑一次：window.bitmapSelfTest()
+window.bitmapSelfTest = runBitmapSelfTest;
 
 window.addEventListener('DOMContentLoaded', init);

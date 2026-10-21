@@ -3,7 +3,7 @@
 工具原作者：栢爅
 Github：LSXIFU
 哔哩哔哩UID：402603542
-版本：1.2 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
+版本：1.3 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
 ========================================
 -->
 <!DOCTYPE html>
@@ -25,7 +25,7 @@ Github：LSXIFU
             <div class="header-meta">
                 <span class="badge">离线可用</span>
                 <span class="badge">PROGMEM</span>
-                <span class="badge badge-version">v1.2</span>
+                <span class="badge badge-version">v1.3</span>
             </div>
         </header>
 
@@ -457,6 +457,15 @@ Github：LSXIFU
                     <label class="field-label" for="height-var">高度变量</label>
                     <input type="text" id="height-var" class="export-input" placeholder="默认 HEIGHT">
                 </div>
+                <div class="field-col">
+                    <label class="field-label" for="output-format">输出格式</label>
+                    <select id="output-format" class="export-input">
+                        <option value="row_msb">行优先 MSB（Adafruit_GFX / U8g2）</option>
+                        <option value="row_lsb">行优先 LSB（老控制器）</option>
+                        <option value="page_lsb">页模式 LSB（SSD1306 / SH1106）</option>
+                        <option value="col_lsb">列优先 LSB（竖排缓冲）</option>
+                    </select>
+                </div>
             </div>
 
             <div class="action-row">
@@ -464,10 +473,6 @@ Github：LSXIFU
                 <button id="export-raw-btn" class="btn btn-primary">导出 Raw</button>
                 <button id="refresh-btn" class="btn btn-ghost">刷新预览</button>
                 <button id="cancel-export-btn" class="btn btn-danger" style="display: none;">终止导出</button>
-                <label class="check check-right">
-                    <input type="checkbox" id="reverse-bits">
-                    <span>反转位序（修复画面错位）</span>
-                </label>
             </div>
 
             <div id="export-progress" class="progress" style="display: none;">
@@ -492,6 +497,56 @@ Github：LSXIFU
                 <summary>展开 / 收起源码</summary>
                 <pre id="result-code"></pre>
             </details>
+        </section>
+
+
+        <!-- ================= 反导入校验 ================= -->
+        <section class="card" id="import-card">
+            <div class="card-head">
+                <h2>反导入校验</h2>
+                <span class="hint">把导出的 .raw / 字节流读回来：格式选错，预览立刻错位成雪花</span>
+            </div>
+
+            <div class="export-grid">
+                <div class="field-col">
+                    <label class="field-label" for="import-file">选择文件</label>
+                    <input type="file" id="import-file" class="export-input" accept=".raw,.bin,.h,.c,.txt">
+                </div>
+                <div class="field-col">
+                    <label class="field-label" for="import-format">数据格式</label>
+                    <select id="import-format" class="export-input">
+                        <option value="row_msb">行优先 MSB</option>
+                        <option value="row_lsb">行优先 LSB</option>
+                        <option value="page_lsb">页模式 LSB（SSD1306）</option>
+                        <option value="col_lsb">列优先 LSB</option>
+                    </select>
+                </div>
+                <div class="field-col">
+                    <label class="field-label" for="import-width">宽（无 .raw 头时必填）</label>
+                    <input type="number" id="import-width" class="export-input" min="1" max="1024" placeholder="例如 128">
+                </div>
+                <div class="field-col">
+                    <label class="field-label" for="import-height">高（无 .raw 头时必填）</label>
+                    <input type="number" id="import-height" class="export-input" min="1" max="1024" placeholder="例如 64">
+                </div>
+            </div>
+
+            <div class="field-col">
+                <label class="field-label" for="import-hex">或粘贴字节流</label>
+                <textarea id="import-hex" class="import-textarea" rows="3" placeholder="0x00, 0xFF, 0x3C …"></textarea>
+            </div>
+
+            <div class="action-row">
+                <button id="import-btn" class="btn btn-primary">解析并预览</button>
+                <button id="import-prev-btn" class="btn btn-ghost">上一帧</button>
+                <button id="import-next-btn" class="btn btn-ghost">下一帧</button>
+                <span id="import-stats" class="stats" aria-live="polite"></span>
+            </div>
+
+            <div class="import-preview">
+                <canvas id="import-canvas" width="1" height="1"></canvas>
+                <span id="import-empty" class="field-hint">还没有导入数据</span>
+            </div>
         </section>
 
         <footer class="app-footer">
