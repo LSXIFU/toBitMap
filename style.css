@@ -610,6 +610,30 @@ input[type="range"] {
     height: 32px;
 }
 
+/* 文字取模：跨整行的多行输入框与宽字段 */
+.field-wide {
+    grid-column: 1 / -1;
+}
+
+.text-input {
+    width: 100%;
+    min-height: 56px;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    resize: vertical;
+}
+
+.text-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
 /* ---------- 按钮 ---------- */
 
 .btn {

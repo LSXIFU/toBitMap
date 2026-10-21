@@ -2496,7 +2496,7 @@ function updateSelectionBox(mode) {
 // · 超采样后面积平均把 IoU 拉到 0.91~1.00、翻转率降到 3~8%；
 // · 倍率按目标尺寸选：≤32px 用 8×（亚像素占比大），更大的用 4×（8× 只剩 <1% 收益，纯烧时间）；
 // · 反锐化默认关：它能把翻转率再压到 1~4%，但 16px 汉字 IoU 从 0.94 掉到 0.82 —— 用保真换稳健，留给用户开。
-const TEXT_LIMITS = { minHeight: 8, maxHeight: 256, maxChars: 24 };
+const TEXT_LIMITS = { minHeight: 8, maxHeight: 256, maxChars: 200 };
 
 function pickTextSupersample(height) {
     return height <= 32 ? 8 : 4;
@@ -2569,64 +2569,137 @@ function renderGlyphCanvas(char, height, fontStack) {
     };
 }
 
-// 整串：按基线对齐 → 紧凑排布 → 整幅居中；宽度向上对齐到 8 的倍数（四种布局都能整字节落位）
-function renderTextLayer(text, options) {
+// 字形缓存：同一串里重复的字（"点阵点阵""1111"）只渲染一次。
+// 键里带字号与字体栈——换字号/字体必须失效，否则会拿到上一档的字形。
+const textGlyphCache = new Map();
+const TEXT_GLYPH_CACHE_LIMIT = 512;
+
+function getCachedGlyph(char, fontSize, fontStack) {
+    const key = fontSize + '|' + fontStack + '|' + char;
+    if (textGlyphCache.has(key)) return textGlyphCache.get(key);
+    if (textGlyphCache.size >= TEXT_GLYPH_CACHE_LIMIT) textGlyphCache.clear();
+    const glyph = renderGlyphCanvas(char, fontSize, fontStack);
+    textGlyphCache.set(key, glyph);   // null 也缓存：缺字的字别每次都去问一遍字体
+    return glyph;
+}
+
+// 多行排版：\n 硬换行 + maxWidth 软换行；行内紧凑排布，行间按 lineGap 叠加。
+// 返回 lineHeight / lineCount / lineGap，是为了让自检能断言
+// "height = lineCount × lineHeight + (lineCount−1) × lineGap" 这条不变量。
+function layoutTextLines(text, options) {
     const opts = options || {};
     const fontSize = Math.max(TEXT_LIMITS.minHeight, Math.min(TEXT_LIMITS.maxHeight, parseInt(opts.height, 10) || 24));
     const fontStack = opts.font || '"Microsoft YaHei", sans-serif';
+    const align = opts.align === 'left' ? 'left' : 'center';
     const chars = Array.from(String(text == null ? '' : text)).slice(0, TEXT_LIMITS.maxChars);
     if (chars.length === 0) return null;
 
     const gap = opts.gap > 0 ? Math.min(64, Math.floor(opts.gap)) : Math.max(1, Math.round(fontSize / 16));
-    const glyphs = [];
-    for (const ch of chars) {
-        if (ch === ' ' || ch === '\u3000') {
-            glyphs.push({ canvas: null, width: Math.max(2, Math.round(fontSize * 0.35)), ascent: 0, descent: 0 });
-            continue;
-        }
-        const glyph = renderGlyphCanvas(ch, fontSize, fontStack);
-        if (glyph) glyphs.push(glyph);
-    }
-    if (glyphs.length === 0) return null;
+    const spaceWidth = Math.max(2, Math.round(fontSize * 0.35));
+    const maxWidth = opts.maxWidth > 0
+        ? Math.max(8, Math.min(AppConfig.maxBitmapSize, Math.floor(opts.maxWidth)))
+        : 0;
 
-    // 基线对齐：整幅高度 = 最大上延 + 最大下延（结果通常略小于字号，因为墨迹不含字框留白）
+    // 先按换行切段，再按 maxWidth 软换行。空段落要保留成空行 —— 空行是排版信息，不是噪声。
+    const paragraphs = [[]];
+    for (const ch of chars) {
+        if (ch === '\r') continue;
+        if (ch === '\n') { paragraphs.push([]); continue; }
+        paragraphs[paragraphs.length - 1].push(ch);
+    }
+
+    const lines = [];
+    let missingGlyphs = 0;
+    for (const paragraph of paragraphs) {
+        let glyphs = [];
+        let contentWidth = 0;
+        for (const ch of paragraph) {
+            const isBlank = ch === ' ' || ch === '\u3000';
+            const glyph = isBlank
+                ? { canvas: null, width: spaceWidth, ascent: 0, descent: 0 }
+                : getCachedGlyph(ch, fontSize, fontStack);
+            if (!glyph) { missingGlyphs++; continue; }
+
+            const advance = glyphs.length === 0 ? glyph.width : gap + glyph.width;
+            if (maxWidth > 0 && glyphs.length > 0 && contentWidth + advance > maxWidth) {
+                lines.push({ glyphs: glyphs, contentWidth: contentWidth });
+                glyphs = [glyph];
+                contentWidth = glyph.width;
+            } else {
+                glyphs.push(glyph);
+                contentWidth += advance;
+            }
+        }
+        lines.push({ glyphs: glyphs, contentWidth: contentWidth });
+    }
+    if (lines.every(line => line.glyphs.length === 0) && missingGlyphs === chars.length) return null;
+
+    // 整幅共用一条基线：所有行取同样的 ascentMax / descentMax，行与行的字才不会一高一低
     let ascentMax = 0, descentMax = 0;
-    for (const glyph of glyphs) {
-        if (glyph.canvas) {
+    for (const line of lines) {
+        for (const glyph of line.glyphs) {
+            if (!glyph.canvas) continue;
             ascentMax = Math.max(ascentMax, glyph.ascent);
             descentMax = Math.max(descentMax, glyph.descent);
         }
     }
-    const height = Math.max(1, ascentMax + descentMax);
+    if (ascentMax + descentMax === 0) { ascentMax = 1; descentMax = 0; }
+    const lineHeight = ascentMax + descentMax;
 
-    const contentWidth = glyphs.reduce((sum, glyph) => sum + glyph.width, 0) + gap * (glyphs.length - 1);
-    const alignedWidth = Math.max(8, Math.ceil(contentWidth / 8) * 8);
+    const lineGap = opts.lineGap > 0
+        ? Math.min(64, Math.floor(opts.lineGap))
+        : Math.max(1, Math.round(fontSize / 8));
+
+    const contentMax = lines.reduce((widest, line) => Math.max(widest, line.contentWidth), 0);
+    const widthRaw = Math.max(contentMax, maxWidth);
+    const heightRaw = lines.length * lineHeight + (lines.length - 1) * lineGap;
+
+    // 画布上限跟其他分支一致（1024）；超了就裁到整字节边界，并把 clipped 标出来给 UI 提示
+    const clipped = widthRaw > AppConfig.maxBitmapSize || heightRaw > AppConfig.maxBitmapSize;
+    const width = Math.max(8, Math.min(AppConfig.maxBitmapSize, Math.ceil(widthRaw / 8) * 8));
+    const height = Math.max(1, Math.min(AppConfig.maxBitmapSize, heightRaw));
 
     const canvas = document.createElement('canvas');
-    canvas.width = alignedWidth;
+    canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, alignedWidth, height);
+    ctx.fillRect(0, 0, width, height);
 
-    let cursor = Math.floor((alignedWidth - contentWidth) / 2);
-    for (const glyph of glyphs) {
-        if (glyph.canvas) {
-            const y = ascentMax - glyph.ascent;
-            ctx.drawImage(glyph.canvas, cursor, y);
+    let glyphCount = 0;
+    for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        const lineTop = index * (lineHeight + lineGap);
+        const startX = align === 'left' ? 0 : Math.floor((width - line.contentWidth) / 2);
+        let cursor = startX;
+        for (const glyph of line.glyphs) {
+            if (glyph.canvas) {
+                ctx.drawImage(glyph.canvas, cursor, lineTop + (ascentMax - glyph.ascent));
+                glyphCount++;
+            }
+            cursor += glyph.width + gap;
         }
-        cursor += glyph.width + gap;
     }
 
     return {
         canvas: canvas,
-        width: alignedWidth,
+        width: width,
         height: height,
-        contentWidth: contentWidth,
+        contentWidth: contentMax,
         fontSize: fontSize,
         gap: gap,
-        glyphCount: glyphs.length
+        lineGap: lineGap,
+        lineHeight: lineHeight,
+        lineCount: lines.length,
+        glyphCount: glyphCount,
+        align: align,
+        clipped: clipped
     };
+}
+
+// 对外沿用 renderTextLayer 这个名字：调用方只关心"给我一张渲染好的字模画布"
+function renderTextLayer(text, options) {
+    return layoutTextLines(text, options);
 }
 
 function readTextConfig() {
@@ -2635,6 +2708,9 @@ function readTextConfig() {
         height: parseInt(getElement('text-height').value, 10) || 24,
         font: getElement('text-font').value,
         gap: parseInt(getElement('text-gap').value, 10) || 0,
+        maxWidth: parseInt(getElement('text-max-width').value, 10) || 0,
+        lineGap: parseInt(getElement('text-line-gap').value, 10) || 0,
+        align: getElement('text-align').value,
         threshold: parseInt(getElement('text-threshold').value, 10),
         invert: getElement('text-invert').checked
     };
@@ -2660,7 +2736,8 @@ function processTextTab() {
     const width = rendered.width;
     const height = rendered.height;
     getElement('text-size-label').textContent =
-        `${width}×${height} · 字号 ${rendered.fontSize} · 内容宽 ${rendered.contentWidth} · 字距 ${rendered.gap} · ${rendered.glyphCount} 字`;
+        `${width}×${height} · 字号 ${rendered.fontSize} · ${rendered.lineCount} 行 · 字距 ${rendered.gap} · 行距 ${rendered.lineGap}`
+        + (rendered.clipped ? ' · 已裁到 1024 上限' : '');
 
     const previewScale = Math.max(1, Math.min(AppConfig.maxPreviewZoom, Math.floor(480 / Math.max(width, height))));
 
@@ -2819,6 +2896,9 @@ function setupEventListeners() {
     getElement('text-content').addEventListener('input', scheduleTextRender);
     getElement('text-height').addEventListener('input', scheduleTextRender);
     getElement('text-gap').addEventListener('input', scheduleTextRender);
+    getElement('text-max-width').addEventListener('input', scheduleTextRender);
+    getElement('text-line-gap').addEventListener('input', scheduleTextRender);
+    getElement('text-align').addEventListener('change', processTextTab);
     getElement('text-font').addEventListener('change', processTextTab);
     getElement('text-invert').addEventListener('change', processTextTab);
     getElement('text-threshold').addEventListener('input', function(e) {
@@ -3905,6 +3985,24 @@ function runTextLayerSelfTest() {
         record('文字层：' + layoutId + ' 字节数', bytes.length === layoutBufferSize(base.width, base.height, layoutId),
                { got: bytes.length, want: layoutBufferSize(base.width, base.height, layoutId) });
     }
+
+    // 多行：硬换行 / 行高×行数+行距 / 软换行 / 行距参数
+    const twoLines = renderTextLayer('点\n阵', { height: 24 });
+    record('文字层：硬换行成两行', twoLines.lineCount === 2, twoLines.lineCount);
+    record('文字层：高度 = 行数×行高 + (行数-1)×行距',
+           twoLines.height === 2 * twoLines.lineHeight + twoLines.lineGap,
+           { height: twoLines.height, lineHeight: twoLines.lineHeight, lineGap: twoLines.lineGap });
+
+    const wrapped = renderTextLayer('点阵点阵', { height: 24, maxWidth: 40 });
+    record('文字层：按最大宽度软换行', wrapped.lineCount >= 2 && wrapped.width === 40,
+           { lines: wrapped.lineCount, width: wrapped.width });
+
+    const wideGap = renderTextLayer('点\n阵', { height: 24, lineGap: 8 });
+    record('文字层：行距参数生效', wideGap.height === twoLines.height - twoLines.lineGap + 8,
+           { with8: wideGap.height, auto: twoLines.height, autoGap: twoLines.lineGap });
+
+    const leftAligned = renderTextLayer('点\n阵', { height: 24, align: 'left' });
+    record('文字层：左对齐时首列有墨', leftAligned.align === 'left', leftAligned.align);
 
     // 渲染确定性：同输入两次必须同一字节流（否则导出的资产不可复现）
     const again = renderBinary('艺术字', { height: 24 }, 128, false);

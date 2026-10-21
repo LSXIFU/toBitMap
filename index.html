@@ -454,9 +454,9 @@ Github：LSXIFU
                             </div>
 
                             <div class="export-grid">
-                                <div class="field-col">
-                                    <label class="field-label" for="text-content">内容</label>
-                                    <input type="text" id="text-content" class="export-input" value="点阵" maxlength="24">
+                                <div class="field-col field-wide">
+                                    <label class="field-label" for="text-content">内容（回车硬换行，超宽自动折行）</label>
+                                    <textarea id="text-content" class="text-input" rows="2" maxlength="200">点阵</textarea>
                                 </div>
                                 <div class="field-col">
                                     <label class="field-label" for="text-height">字高</label>
@@ -472,8 +472,23 @@ Github：LSXIFU
                                     </select>
                                 </div>
                                 <div class="field-col">
+                                    <label class="field-label" for="text-max-width">最大宽度（0=不限）</label>
+                                    <input type="number" id="text-max-width" class="export-input" value="0" min="0" max="1024">
+                                </div>
+                                <div class="field-col">
                                     <label class="field-label" for="text-gap">字距（0=自动）</label>
                                     <input type="number" id="text-gap" class="export-input" value="0" min="0" max="64">
+                                </div>
+                                <div class="field-col">
+                                    <label class="field-label" for="text-line-gap">行距（0=自动）</label>
+                                    <input type="number" id="text-line-gap" class="export-input" value="0" min="0" max="64">
+                                </div>
+                                <div class="field-col">
+                                    <label class="field-label" for="text-align">对齐</label>
+                                    <select id="text-align" class="export-input">
+                                        <option value="center">居中</option>
+                                        <option value="left">左对齐</option>
+                                    </select>
                                 </div>
                             </div>
 
