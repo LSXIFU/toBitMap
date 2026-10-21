@@ -752,8 +752,9 @@ function sanitizeFileName(value, fallback) {
 function formatCHeader(bytes, options) {
     const { width, height } = options;
     const arrayName = sanitizeCIdentifier(options.arrayName, 'image_bits');
-    const widthVar = sanitizeCIdentifier(options.widthVar, 'WIDTH');
-    const heightVar = sanitizeCIdentifier(options.heightVar, 'HEIGHT');
+    // 宏名统一大写是既有约定，但要在"改名提示"之前定稿：填 Wid 得到 WID 也是改动，得让用户看见
+    const widthVar = sanitizeCIdentifier(options.widthVar, 'WIDTH').toUpperCase();
+    const heightVar = sanitizeCIdentifier(options.heightVar, 'HEIGHT').toUpperCase();
     const lines = [];
 
     // 改了名字要让人看见，别以为填的原始字符串生效了
@@ -769,8 +770,8 @@ function formatCHeader(bytes, options) {
         const layout = getLayout(options.layoutId);
         lines.push(`// layout: ${layout.label} (${layout.hint}) ${width}x${height} ${bytes.length}B`);
     }
-    lines.push(`#define ${widthVar.toUpperCase()} ${width}`);
-    lines.push(`#define ${heightVar.toUpperCase()} ${height}`);
+    lines.push(`#define ${widthVar} ${width}`);
+    lines.push(`#define ${heightVar} ${height}`);
     lines.push(`static const unsigned char ${arrayName}[] PROGMEM = {`);
     
     for (let i = 0; i < bytes.length; i += 8) {
@@ -778,7 +779,10 @@ function formatCHeader(bytes, options) {
         for (let j = i; j < i + 8 && j < bytes.length; j++) {
             chunk.push('0x' + bytes[j].toString(16).padStart(2, '0'));
         }
-        lines.push('  ' + chunk.join(', '));
+        // 行尾逗号不能省：C 的初始化列表靠逗号分隔，两行之间没有逗号就是
+        // `{ 0x01, 0x02 0x03 }` —— 语法错误。MSVC 实测：error C2059。
+        // 末尾多一个逗号（`{ ..., };`）在 C89/C99 里都是合法的，所以统一补。
+        lines.push('  ' + chunk.join(', ') + ',');
     }
     
     lines.push('};');
@@ -920,6 +924,9 @@ function setupTabs() {
             getElement('array-name').value = modeStates[activeMode].arrayName;
             getElement('width-var').value = modeStates[activeMode].widthVar;
             getElement('height-var').value = modeStates[activeMode].heightVar;
+
+            // 目标 tab 还没有结果时补算一次：否则切过去是空面板，点导出还会走 lastRender 重算
+            if (!modeStates[activeMode].resultCode) refreshResult();
         });
     });
 }
@@ -1281,56 +1288,77 @@ function drawSourceIntoCanvas(ctx, mode, width, height) {
     drawSourceDownscaled(ctx, source, crop, width, height);
 }
 
-function generateCode(imageData, width, height) {
+// targetMode 让「给别的 tab 预热结果」成为可能（首屏渲染文字层就是这种场景），
+// 同时保证：只有目标 tab 就是当前 tab 时才读写 DOM 上的名字与结果面板。
+// 不这样区分的话，首屏那次文字渲染会把文字样张写进图片 tab 的 resultCode。
+function generateCode(imageData, width, height, targetMode) {
+    const mode = targetMode || activeMode;
+    const state = modeStates[mode];
+    const fromUi = mode === activeMode;
+
     const options = {
         width: width,
         height: height,
-        arrayName: getElement('array-name').value || 'image_bits',
-        widthVar: getElement('width-var').value || 'WIDTH',
-        heightVar: getElement('height-var').value || 'HEIGHT'
+        arrayName: (fromUi && getElement('array-name').value) || state.arrayName || 'image_bits',
+        widthVar: (fromUi && getElement('width-var').value) || state.widthVar || 'WIDTH',
+        heightVar: (fromUi && getElement('height-var').value) || state.heightVar || 'HEIGHT'
     };
-    
-    const fileName = getElement('file-name').value || modeStates[activeMode].fileName;
-    
-    modeStates[activeMode].fileName = fileName;
-    modeStates[activeMode].arrayName = options.arrayName;
-    modeStates[activeMode].widthVar = options.widthVar;
-    modeStates[activeMode].heightVar = options.heightVar;
-    
+
+    const fileName = (fromUi && getElement('file-name').value) || state.fileName;
+    state.fileName = fileName;
+    state.arrayName = options.arrayName;
+    state.widthVar = options.widthVar;
+    state.heightVar = options.heightVar;
+
     options.layoutId = getOutputLayout();
     const code = formatCHeader(encodeBitmap(imageData, options.layoutId), options);
-    
+
     // 内容没变就不碰 DOM：滑杆拖动时每帧重写整段文本会强制重排
-    if (code !== modeStates[activeMode].resultCode) {
-        modeStates[activeMode].resultCode = code;
-        getElement('result-code').textContent = code;
+    if (code !== state.resultCode) {
+        state.resultCode = code;
+        if (fromUi) getElement('result-code').textContent = code;
     }
-    
-    updateResultStats(width, height);
+
+    if (fromUi) updateResultStats(width, height);
 }
 
 let pendingCodeTimer = null;
-let lastRender = null;
+let lastRender = null;   // { imageData, width, height, mode } —— mode 是归属 tab，不能只有像素
 
 // 预览是每帧刷新的，代码文本没必要跟着每帧重算：攒 60ms 再生成
-function scheduleCodeGeneration(imageData, width, height) {
-    lastRender = { imageData: imageData, width: width, height: height };
-    
+function scheduleCodeGeneration(imageData, width, height, targetMode) {
+    const mode = targetMode || activeMode;
+    lastRender = { imageData: imageData, width: width, height: height, mode: mode };
+
     if (pendingCodeTimer) clearTimeout(pendingCodeTimer);
     pendingCodeTimer = setTimeout(() => {
         pendingCodeTimer = null;
-        generateCode(imageData, width, height);
+        generateCode(imageData, width, height, mode);
     }, 60);
 }
 
-// 导出前必须先落盘，否则可能导出去抖期间的旧结果
+// 导出前必须先落盘，否则可能导出去抖期间的旧结果。
+// 关键：lastRender 可能是别的 tab 留下的（切 tab 不会清它），拿去重算就会
+// 「面板写着 20x10，导出的是文字 tab 的 48x23」。归属不符时重新处理当前 tab。
 function refreshCodeNow() {
     if (pendingCodeTimer) {
         clearTimeout(pendingCodeTimer);
         pendingCodeTimer = null;
     }
-    if (lastRender) {
-        generateCode(lastRender.imageData, lastRender.width, lastRender.height);
+    if (lastRender && lastRender.mode === activeMode) {
+        generateCode(lastRender.imageData, lastRender.width, lastRender.height, activeMode);
+        return;
+    }
+
+    // 归属不符：重新处理当前 tab。refreshResult 走的是 60ms 防抖，
+    // 而导出端紧接着就同步读 resultCode —— 这里必须立刻落盘，否则导出的是空串。
+    refreshResult();
+    if (pendingCodeTimer) {
+        clearTimeout(pendingCodeTimer);
+        pendingCodeTimer = null;
+    }
+    if (lastRender && lastRender.mode === activeMode) {
+        generateCode(lastRender.imageData, lastRender.width, lastRender.height, activeMode);
     }
 }
 
@@ -1694,8 +1722,8 @@ function processImage() {
         
         return processed;
     });
-    
-    scheduleCodeGeneration(processedImageData, width, height);
+
+    scheduleCodeGeneration(processedImageData, width, height, 'image');
 }
 
 function processVideo() {
@@ -1753,8 +1781,8 @@ function processVideoFrame() {
             
             return processed;
         });
-        
-        scheduleCodeGeneration(processedImageData, width, height);
+
+        scheduleCodeGeneration(processedImageData, width, height, 'video');
     }
 }
 
@@ -1928,8 +1956,8 @@ function processDrawCanvas() {
         
         return pixels;
     });
-    
-    scheduleCodeGeneration(imageData, width, height);
+
+    scheduleCodeGeneration(imageData, width, height, 'draw');
 }
 
 function showBatchImage(index) {
@@ -2819,7 +2847,7 @@ function processTextTab() {
         return result;
     });
 
-    scheduleCodeGeneration(processed, width, height);
+    scheduleCodeGeneration(processed, width, height, 'text');
 }
 
 function setupEventListeners() {
@@ -3912,6 +3940,21 @@ function runBitmapSelfTest() {
             break;
         }
     }
+
+    // C 源码结构：数组体里每一行都必须以逗号结尾。
+    // 少了这个断言，'每行缺逗号' 这种能让所有导出头编译不过的 bug 会一路绿灯
+    // （实测：MSVC error C2059，而自检当时全过）。
+    const headerText = formatCHeader(encodeBitmap(makeTestCanonical(37, 23, 3), 'row_msb'), {
+        width: 37, height: 23, layoutId: 'row_msb'
+    });
+    const bodyLines = headerText.split('\n').slice(headerText.split('\n').findIndex(l => l.endsWith('{')) + 1);
+    const elementLines = bodyLines.slice(0, bodyLines.length - 1);   // 去掉最后的 '};'
+    record('C 源码：数组体每行以逗号结尾',
+           elementLines.length > 0 && elementLines.every(line => /,\s*$/.test(line)),
+           { lines: elementLines.length, firstBad: elementLines.find(line => !/,\s*$/.test(line)) });
+    record('C 源码：元素数 = 字节数',
+           (headerText.match(/0x[0-9a-f]{2}/g) || []).length === Math.ceil(37 / 8) * 23,
+           { got: (headerText.match(/0x[0-9a-f]{2}/g) || []).length, want: Math.ceil(37 / 8) * 23 });
 
     return {
         pass: failures.length === 0,
