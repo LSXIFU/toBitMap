@@ -75,7 +75,7 @@ let isRawExporting = false;
 let cancelRawExport = false;
 
 // 阈值类型 → 着色器分支索引。UI 传 'brightness'，历史代码里写作 'luminance'，两者同义。
-// 未知类型一律回落到亮度分支，与 CPU 路径（_cpuBinary 的 else）保持一致。
+// 未知类型一律回落到亮度分支，与 CPU 路径（binarizeImageData 的 else）保持一致。
 const THRESHOLD_TYPE_INDEX = { rgb: 0, brightness: 1, luminance: 1, individual: 2 };
 
 // 批量导入时认定哪些压缩包条目是图片
@@ -84,6 +84,61 @@ const IMAGE_EXTENSION = /\.(jpe?g|png|gif|bmp|webp)$/i;
 function thresholdTypeToIndex(thresholdType) {
     const index = THRESHOLD_TYPE_INDEX[thresholdType];
     return index === undefined ? 1 : index;
+}
+
+// CPU 二值化。与着色器同语义：'individual' 用三通道区间掩码求均，再与同一阈值比较
+// （原来这里写死 128，导致该模式下「颜色阈值」滑杆在 CPU 路径完全无效）。
+// 不就地改写传入的 ImageData，返回新的 ImageData。
+function binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, invert) {
+    const source = imageData.data;
+    const data = new Uint8ClampedArray(source);
+    
+    if (thresholdType === 'individual') {
+        const redMin = parseInt(rgbThresholds.redMin);
+        const redMax = parseInt(rgbThresholds.redMax);
+        const greenMin = parseInt(rgbThresholds.greenMin);
+        const greenMax = parseInt(rgbThresholds.greenMax);
+        const blueMin = parseInt(rgbThresholds.blueMin);
+        const blueMax = parseInt(rgbThresholds.blueMax);
+        
+        for (let i = 0; i < data.length; i += 4) {
+            const r = (data[i] >= redMin && data[i] <= redMax) ? 255 : 0;
+            const g = (data[i + 1] >= greenMin && data[i + 1] <= greenMax) ? 255 : 0;
+            const b = (data[i + 2] >= blueMin && data[i + 2] <= blueMax) ? 255 : 0;
+            
+            const avg = (r + g + b) / 3;
+            let binaryValue = avg < threshold ? 0 : 255;
+            
+            if (invert) {
+                binaryValue = binaryValue === 0 ? 255 : 0;
+            }
+            
+            data[i] = binaryValue;
+            data[i + 1] = binaryValue;
+            data[i + 2] = binaryValue;
+        }
+    } else {
+        for (let i = 0; i < data.length; i += 4) {
+            let value;
+            if (thresholdType === 'rgb') {
+                value = (data[i] + data[i + 1] + data[i + 2]) / 3;
+            } else {
+                value = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            }
+            
+            let binaryValue = value < threshold ? 0 : 255;
+            
+            if (invert) {
+                binaryValue = binaryValue === 0 ? 255 : 0;
+            }
+            
+            data[i] = binaryValue;
+            data[i + 1] = binaryValue;
+            data[i + 2] = binaryValue;
+        }
+    }
+    
+    return new ImageData(data, imageData.width, imageData.height);
 }
 
 class CanvasPool {
@@ -238,7 +293,7 @@ class WebGLImageProcessor {
     
     processBinary(imageData, thresholdType, threshold, rgbThresholds, invert) {
         if (!this.initialized) {
-            return this._cpuBinary(imageData, thresholdType, threshold, rgbThresholds, invert);
+            return binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, invert);
         }
         
         const gl = this.gl;
@@ -315,57 +370,6 @@ class WebGLImageProcessor {
         }
         
         return new ImageData(resultData, width, height);
-    }
-    
-    _cpuBinary(imageData, thresholdType, threshold, rgbThresholds, invert) {
-        const data = imageData.data;
-        
-        if (thresholdType === 'individual') {
-            const redMin = parseInt(rgbThresholds.redMin);
-            const redMax = parseInt(rgbThresholds.redMax);
-            const greenMin = parseInt(rgbThresholds.greenMin);
-            const greenMax = parseInt(rgbThresholds.greenMax);
-            const blueMin = parseInt(rgbThresholds.blueMin);
-            const blueMax = parseInt(rgbThresholds.blueMax);
-            
-            for (let i = 0; i < data.length; i += 4) {
-                const r = (data[i] >= redMin && data[i] <= redMax) ? 255 : 0;
-                const g = (data[i+1] >= greenMin && data[i+1] <= greenMax) ? 255 : 0;
-                const b = (data[i+2] >= blueMin && data[i+2] <= blueMax) ? 255 : 0;
-                
-                const avg = (r + g + b) / 3;
-                let binaryValue = avg < 128 ? 0 : 255;
-                
-                if (invert) {
-                    binaryValue = binaryValue === 0 ? 255 : 0;
-                }
-                
-                data[i] = binaryValue;
-                data[i+1] = binaryValue;
-                data[i+2] = binaryValue;
-            }
-        } else {
-            for (let i = 0; i < data.length; i += 4) {
-                let value;
-                if (thresholdType === 'rgb') {
-                    value = (data[i] + data[i+1] + data[i+2]) / 3;
-                } else {
-                    value = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
-                }
-                
-                let binaryValue = value < threshold ? 0 : 255;
-                
-                if (invert) {
-                    binaryValue = binaryValue === 0 ? 255 : 0;
-                }
-                
-                data[i] = binaryValue;
-                data[i+1] = binaryValue;
-                data[i+2] = binaryValue;
-            }
-        }
-        
-        return imageData;
     }
     
     isAvailable() {
@@ -982,7 +986,7 @@ function processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, 
     if (glProcessor && glProcessor.isAvailable()) {
         return glProcessor.processBinary(imageData, thresholdType, threshold, rgbThresholds, invert);
     }
-    return glProcessor._cpuBinary(imageData, thresholdType, threshold, rgbThresholds, invert);
+    return binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, invert);
 }
 
 function calculatePreviewSize(originalWidth, originalHeight, maxSize) {
