@@ -12,8 +12,7 @@ const AppConfig = {
     maxPreviewSize: 400,
     maxCanvasSize: 400,
     defaultSize: 32,
-    canvasPoolSize: 4,
-    workerEnabled: true
+    canvasPoolSize: 4
 };
 
 const modeStates = {
@@ -393,248 +392,14 @@ class WebGLImageProcessor {
     }
 }
 
-class ImageProcessingWorker {
-    constructor() {
-        this.worker = null;
-        this.pendingCallbacks = new Map();
-        this.callbackId = 0;
-        this.enabled = AppConfig.workerEnabled;
-        this.init();
-    }
-    
-    init() {
-        if (!this.enabled || typeof Worker === 'undefined') {
-            return;
-        }
-        
-        const workerCode = `
-            self.onmessage = function(e) {
-                const { id, type, data } = e.data;
-                
-                switch (type) {
-                    case 'generateCode':
-                        const result = generateCodeFromData(data);
-                        self.postMessage({ id, result });
-                        break;
-                    case 'imageDataToBytes':
-                        const bytes = imageDataToBytesWorker(data);
-                        self.postMessage({ id, result: bytes }, [bytes.buffer]);
-                        break;
-                }
-            };
-            
-            function generateCodeFromData(data) {
-                const { imageData, width, height, fileName, arrayName, widthVar, heightVar } = data;
-                const pixelData = imageData.data;
-                const bits = [];
-                
-                for (let y = 0; y < height; y++) {
-                    for (let x = 0; x < width; x += 8) {
-                        let byte = 0;
-                        for (let i = 0; i < 8 && x + i < width; i++) {
-                            const index = (y * width + x + i) * 4;
-                            const value = pixelData[index] > 128 ? 1 : 0;
-                            byte |= value << (7 - i);
-                        }
-                        bits.push(byte.toString(16).padStart(2, '0'));
-                    }
-                }
-                
-                let code = '#define ' + widthVar.toUpperCase() + ' ' + width + '\\n';
-                code += '#define ' + heightVar.toUpperCase() + ' ' + height + '\\n';
-                code += 'static const unsigned char ' + arrayName + '[] PROGMEM = {\\n';
-                
-                for (let i = 0; i < bits.length; i += 8) {
-                    const row = bits.slice(i, i + 8).map(b => '0x' + b).join(', ');
-                    code += '  ' + row + ',\\n';
-                }
-                
-                code += '};\\n';
-                return code;
-            }
-            
-            function imageDataToBytesWorker(data) {
-                const { imageData, reverseBitOrder, width, height } = data;
-                const pixels = imageData.data;
-                const bytes = [];
-                const bytesPerRow = Math.ceil(width / 8);
-                
-                function reverseBits(byte) {
-                    let result = 0;
-                    for (let i = 0; i < 8; i++) {
-                        result = (result << 1) | ((byte >> i) & 1);
-                    }
-                    return result;
-                }
-                
-                for (let y = 0; y < height; y++) {
-                    for (let rowByte = 0; rowByte < bytesPerRow; rowByte++) {
-                        let byte = 0;
-                        for (let bit = 0; bit < 8; bit++) {
-                            const x = rowByte * 8 + bit;
-                            if (x < width) {
-                                const index = (y * width + x) * 4;
-                                const value = pixels[index] > 128 ? 1 : 0;
-                                byte |= value << (7 - bit);
-                            }
-                        }
-                        if (reverseBitOrder) {
-                            bytes.push(reverseBits(byte));
-                        } else {
-                            bytes.push(byte);
-                        }
-                    }
-                }
-                return new Uint8Array(bytes);
-            }
-        `;
-        
-        try {
-            const blob = new Blob([workerCode], { type: 'application/javascript' });
-            this.worker = new Worker(URL.createObjectURL(blob));
-            
-            this.worker.onmessage = (e) => {
-                const { id, result } = e.data;
-                const callback = this.pendingCallbacks.get(id);
-                if (callback) {
-                    callback(result);
-                    this.pendingCallbacks.delete(id);
-                }
-            };
-        } catch (e) {
-            console.warn('Web Worker initialization failed:', e);
-            this.worker = null;
-        }
-    }
-    
-    generateCodeAsync(imageData, width, height, fileName, arrayName, widthVar, heightVar) {
-        return new Promise((resolve) => {
-            if (!this.worker) {
-                resolve(this._generateCodeSync(imageData, width, height, fileName, arrayName, widthVar, heightVar));
-                return;
-            }
-            
-            const id = this.callbackId++;
-            this.pendingCallbacks.set(id, resolve);
-            
-            const transferable = {
-                id,
-                type: 'generateCode',
-                data: {
-                    imageData: { data: imageData.data, width: imageData.width, height: imageData.height },
-                    width,
-                    height,
-                    fileName,
-                    arrayName,
-                    widthVar,
-                    heightVar
-                }
-            };
-            
-            this.worker.postMessage(transferable, [imageData.data.buffer]);
-        });
-    }
-    
-    imageDataToBytesAsync(imageData, reverseBitOrder, width, height) {
-        return new Promise((resolve) => {
-            if (!this.worker) {
-                resolve(this._imageDataToBytesSync(imageData, reverseBitOrder, width, height));
-                return;
-            }
-            
-            const id = this.callbackId++;
-            this.pendingCallbacks.set(id, resolve);
-            
-            this.worker.postMessage({
-                id,
-                type: 'imageDataToBytes',
-                data: {
-                    imageData: { data: imageData.data, width: imageData.width, height: imageData.height },
-                    reverseBitOrder,
-                    width,
-                    height
-                }
-            }, [imageData.data.buffer]);
-        });
-    }
-    
-    _generateCodeSync(imageData, width, height, fileName, arrayName, widthVar, heightVar) {
-        const data = imageData.data;
-        const bits = [];
-        
-        for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x += 8) {
-                let byte = 0;
-                for (let i = 0; i < 8 && x + i < width; i++) {
-                    const index = (y * width + x + i) * 4;
-                    const value = data[index] > 128 ? 1 : 0;
-                    byte |= value << (7 - i);
-                }
-                bits.push(byte.toString(16).padStart(2, '0'));
-            }
-        }
-        
-        let code = `#define ${widthVar.toUpperCase()} ${width}\n`;
-        code += `#define ${heightVar.toUpperCase()} ${height}\n`;
-        code += `static const unsigned char ${arrayName}[] PROGMEM = {\n`;
-        
-        for (let i = 0; i < bits.length; i += 8) {
-            const row = bits.slice(i, i + 8).map(b => `0x${b}`).join(', ');
-            code += `  ${row},\n`;
-        }
-        
-        code += `};\n`;
-        return code;
-    }
-    
-    _imageDataToBytesSync(imageData, reverseBitOrder, width, height) {
-        const data = imageData.data;
-        const bytes = [];
-        const bytesPerRow = Math.ceil(width / 8);
-        
-        const reverseBits = (byte) => {
-            let result = 0;
-            for (let i = 0; i < 8; i++) {
-                result = (result << 1) | ((byte >> i) & 1);
-            }
-            return result;
-        };
-        
-        for (let y = 0; y < height; y++) {
-            for (let rowByte = 0; rowByte < bytesPerRow; rowByte++) {
-                let byte = 0;
-                for (let bit = 0; bit < 8; bit++) {
-                    const x = rowByte * 8 + bit;
-                    if (x < width) {
-                        const index = (y * width + x) * 4;
-                        const value = data[index] > 128 ? 1 : 0;
-                        byte |= value << (7 - bit);
-                    }
-                }
-                if (reverseBitOrder) {
-                    bytes.push(reverseBits(byte));
-                } else {
-                    bytes.push(byte);
-                }
-            }
-        }
-        return new Uint8Array(bytes);
-    }
-    
-    isAvailable() {
-        return this.worker !== null;
-    }
-}
-
 let canvasPool = null;
 let glProcessor = null;
-let imageWorker = null;
 let currentImage = null;
 let currentVideo = null;
 let rafId = null;
 let pendingProcess = null;
 
-function reverse_bits(byte) {
+function reverseBits(byte) {
     let result = 0;
     for (let i = 0; i < 8; i++) {
         result = (result << 1) | ((byte >> i) & 1);
@@ -642,32 +407,53 @@ function reverse_bits(byte) {
     return result;
 }
 
-function imageDataToBytes(imageData, reverseBitOrder = false) {
+// 唯一的位打包实现（原来散在 5 处）：行优先、MSB 在前。
+// reverseBitOrder 整体翻转位序，对应 LSB 在前的屏幕。
+function packBitmapBytes(imageData, reverseBitOrder = false) {
     const width = imageData.width;
     const height = imageData.height;
     const data = imageData.data;
-    const bytes = [];
     const bytesPerRow = Math.ceil(width / 8);
+    const bytes = new Uint8Array(bytesPerRow * height);
+    let offset = 0;
     
     for (let y = 0; y < height; y++) {
+        const rowBase = y * width;
         for (let rowByte = 0; rowByte < bytesPerRow; rowByte++) {
             let byte = 0;
             for (let bit = 0; bit < 8; bit++) {
                 const x = rowByte * 8 + bit;
-                if (x < width) {
-                    const index = (y * width + x) * 4;
-                    const value = data[index] > 128 ? 1 : 0;
-                    byte |= value << (7 - bit);
+                if (x >= width) break;
+                if (data[(rowBase + x) * 4] > 128) {
+                    byte |= 1 << (7 - bit);
                 }
             }
-            if (reverseBitOrder) {
-                bytes.push(reverse_bits(byte));
-            } else {
-                bytes.push(byte);
-            }
+            bytes[offset++] = reverseBitOrder ? reverseBits(byte) : byte;
         }
     }
-    return new Uint8Array(bytes);
+    
+    return bytes;
+}
+
+// 唯一的 C 源码格式化实现
+function formatCHeader(bytes, options) {
+    const { width, height, arrayName, widthVar, heightVar } = options;
+    const lines = [];
+    
+    lines.push(`#define ${widthVar.toUpperCase()} ${width}`);
+    lines.push(`#define ${heightVar.toUpperCase()} ${height}`);
+    lines.push(`static const unsigned char ${arrayName}[] PROGMEM = {`);
+    
+    for (let i = 0; i < bytes.length; i += 8) {
+        const chunk = [];
+        for (let j = i; j < i + 8 && j < bytes.length; j++) {
+            chunk.push('0x' + bytes[j].toString(16).padStart(2, '0'));
+        }
+        lines.push('  ' + chunk.join(', '));
+    }
+    
+    lines.push('};');
+    return lines.join('\n');
 }
 
 function generateRawFilename(baseName, width, height, fps, totalFrames) {
@@ -714,7 +500,6 @@ function isExportingFrames() {
 function init() {
     canvasPool = new CanvasPool(AppConfig.canvasPoolSize);
     glProcessor = new WebGLImageProcessor();
-    imageWorker = new ImageProcessingWorker();
     
     drawCanvas = document.getElementById('draw-canvas');
     drawCtx = drawCanvas.getContext('2d', { willReadFrequently: true });
@@ -1077,41 +862,22 @@ function drawSourceIntoCanvas(ctx, mode, width, height) {
 }
 
 function generateCode(imageData, width, height) {
-    const data = imageData.data;
-    const bits = [];
-    
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x += 8) {
-            let byte = 0;
-            for (let i = 0; i < 8 && x + i < width; i++) {
-                const index = (y * width + x + i) * 4;
-                const value = data[index] > 128 ? 1 : 0;
-                byte |= value << (7 - i);
-            }
-            bits.push(byte.toString(16).padStart(2, '0'));
-        }
-    }
+    const options = {
+        width: width,
+        height: height,
+        arrayName: getElement('array-name').value || 'image_bits',
+        widthVar: getElement('width-var').value || 'WIDTH',
+        heightVar: getElement('height-var').value || 'HEIGHT'
+    };
     
     const fileName = getElement('file-name').value || modeStates[activeMode].fileName;
-    const arrayName = getElement('array-name').value || 'image_bits';
-    const widthVar = getElement('width-var').value || 'WIDTH';
-    const heightVar = getElement('height-var').value || 'HEIGHT';
     
     modeStates[activeMode].fileName = fileName;
-    modeStates[activeMode].arrayName = arrayName;
-    modeStates[activeMode].widthVar = widthVar;
-    modeStates[activeMode].heightVar = heightVar;
+    modeStates[activeMode].arrayName = options.arrayName;
+    modeStates[activeMode].widthVar = options.widthVar;
+    modeStates[activeMode].heightVar = options.heightVar;
     
-    let code = `#define ${widthVar.toUpperCase()} ${width}\n`;
-    code += `#define ${heightVar.toUpperCase()} ${height}\n`;
-    code += `static const unsigned char ${arrayName}[] PROGMEM = {\n`;
-    
-    for (let i = 0; i < bits.length; i += 8) {
-        const row = bits.slice(i, i + 8).map(b => `0x${b}`).join(', ');
-        code += `  ${row},\n`;
-    }
-    
-    code += `};\n`;
+    const code = formatCHeader(packBitmapBytes(imageData), options);
     
     modeStates[activeMode].resultCode = code;
     getElement('result-code').textContent = code;
@@ -2538,36 +2304,13 @@ function exportVideo() {
             }
             
             if (shouldAddFrame) {
-                const data = processedImageData.data;
-                const bits = [];
-                
-                for (let y = 0; y < height; y++) {
-                    for (let x = 0; x < width; x += 8) {
-                        let byte = 0;
-                        for (let i = 0; i < 8 && x + i < width; i++) {
-                            const index = (y * width + x + i) * 4;
-                            const value = data[index] > 128 ? 1 : 0;
-                            byte |= value << (7 - i);
-                        }
-                        bits.push(byte.toString(16).padStart(2, '0'));
-                    }
-                }
-                
-                const fileName = getElement('file-name').value || modeStates.video.fileName;
-                const arrayName = getElement('array-name').value || 'image_bits';
-                const widthVar = getElement('width-var').value || 'WIDTH';
-                const heightVar = getElement('height-var').value || 'HEIGHT';
-                
-                let code = `#define ${widthVar.toUpperCase()} ${width}\n`;
-                code += `#define ${heightVar.toUpperCase()} ${height}\n`;
-                code += `static const unsigned char ${arrayName}[] PROGMEM = {\n`;
-                
-                for (let i = 0; i < bits.length; i += 8) {
-                    const row = bits.slice(i, i + 8).map(b => `0x${b}`).join(', ');
-                    code += `  ${row},\n`;
-                }
-                
-                code += `};\n`;
+                const code = formatCHeader(packBitmapBytes(processedImageData), {
+                    width: width,
+                    height: height,
+                    arrayName: getElement('array-name').value || 'image_bits',
+                    widthVar: getElement('width-var').value || 'WIDTH',
+                    heightVar: getElement('height-var').value || 'HEIGHT'
+                });
                 
                 currentZipFrames.push({ frame: frameNumber, code: code });
                 frameNumber++;
@@ -2719,7 +2462,7 @@ function exportRawImage() {
     
     const reverseBits = getElement('reverse-bits').checked;
     
-    const bytes = imageDataToBytes(imageData, reverseBits);
+    const bytes = packBitmapBytes(imageData, reverseBits);
     
     const totalFrames = 1;
     const fps = 10;
@@ -2815,7 +2558,7 @@ function exportRawVideo() {
                 blueMax: getElement('video-blue-max').value
             };
             const processedImageData = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
-            const frameBytes = imageDataToBytes(processedImageData, reverseBits);
+            const frameBytes = packBitmapBytes(processedImageData, reverseBits);
             
             let shouldAddFrame = true;
             
