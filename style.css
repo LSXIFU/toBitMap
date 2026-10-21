@@ -399,6 +399,7 @@ h3 {
     border: 1px solid #ddd;
     background-color: white;
     cursor: crosshair;
+    touch-action: none;
 }
 
 #video-preview {

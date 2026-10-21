@@ -1486,22 +1486,45 @@ function processVideoFrame() {
     }
 }
 
-function setupDrawCanvas() {
-    const width = parseInt(getElement('draw-width').value);
-    const height = parseInt(getElement('draw-height').value);
-    
+function getDrawGridSize() {
+    return {
+        width: Math.max(1, parseInt(getElement('draw-width').value) || 16),
+        height: Math.max(1, parseInt(getElement('draw-height').value) || 16)
+    };
+}
+
+function getDrawScaleFactor(width, height) {
     const maxCanvasSize = Math.min(
         window.innerWidth * 0.8,
         window.innerHeight * 0.6
     );
+    return Math.min(10, maxCanvasSize / Math.max(width, height));
+}
+
+// 改画布尺寸就把画作清空太粗暴：先把旧画面截下来，按比例铺回新画布
+function renderDrawSurface(preserveContent) {
+    const { width, height } = getDrawGridSize();
+    const scaleFactor = getDrawScaleFactor(width, height);
     
-    const scaleFactor = Math.min(10, maxCanvasSize / Math.max(width, height));
+    let snapshot = null;
+    if (preserveContent && drawCanvas.width > 0 && drawCanvas.height > 0) {
+        snapshot = document.createElement('canvas');
+        snapshot.width = drawCanvas.width;
+        snapshot.height = drawCanvas.height;
+        snapshot.getContext('2d').drawImage(drawCanvas, 0, 0);
+    }
     
     drawCanvas.width = width * scaleFactor;
     drawCanvas.height = height * scaleFactor;
+    drawCtx = drawCanvas.getContext('2d', { willReadFrequently: true });
     
     drawCtx.fillStyle = 'white';
-    drawCtx.fillRect(0, 0, width * scaleFactor, height * scaleFactor);
+    drawCtx.fillRect(0, 0, drawCanvas.width, drawCanvas.height);
+    
+    if (snapshot) {
+        drawCtx.imageSmoothingEnabled = false;
+        drawCtx.drawImage(snapshot, 0, 0, drawCanvas.width, drawCanvas.height);
+    }
     
     drawCtx.strokeStyle = '#ddd';
     for (let i = 0; i <= width; i++) {
@@ -1517,14 +1540,23 @@ function setupDrawCanvas() {
         drawCtx.stroke();
     }
     
-    drawCanvas.addEventListener('mousedown', startDrawing);
-    drawCanvas.addEventListener('mousemove', draw);
-    drawCanvas.addEventListener('mouseup', stopDrawing);
-    drawCanvas.addEventListener('mouseout', stopDrawing);
+    return { width, height, scaleFactor };
+}
+
+function setupDrawCanvas() {
+    // 监听器只挂一次：以前每次改画布尺寸都重新 addEventListener，
+    // 改几次尺寸就叠几层，单次 pointermove 会重复执行多遍 draw()
+    drawCanvas.addEventListener('pointerdown', startDrawing);
+    drawCanvas.addEventListener('pointermove', draw);
+    drawCanvas.addEventListener('pointerup', stopDrawing);
+    drawCanvas.addEventListener('pointercancel', stopDrawing);
+    drawCanvas.addEventListener('pointerleave', stopDrawing);
+    
+    renderDrawSurface(false);
 }
 
 function resizeDrawCanvas() {
-    setupDrawCanvas();
+    renderDrawSurface(true);
     processDrawCanvas();
 }
 
@@ -1537,18 +1569,13 @@ function draw(e) {
     if (!isDrawing) return;
     
     const rect = drawCanvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+    // 画布被 CSS 缩放时用显示尺寸换算，否则笔触与网格错位
+    const displayScale = rect.width ? drawCanvas.width / rect.width : 1;
+    const mouseX = (e.clientX - rect.left) * displayScale;
+    const mouseY = (e.clientY - rect.top) * displayScale;
     
-    const width = parseInt(getElement('draw-width').value);
-    const height = parseInt(getElement('draw-height').value);
-    
-    const maxCanvasSize = Math.min(
-        window.innerWidth * 0.8,
-        window.innerHeight * 0.6
-    );
-    
-    const scaleFactor = Math.min(10, maxCanvasSize / Math.max(width, height));
+    const { width, height } = getDrawGridSize();
+    const scaleFactor = getDrawScaleFactor(width, height);
     
     const brushRadius = brushSize * (scaleFactor / 2);
     
@@ -1556,6 +1583,10 @@ function draw(e) {
     const endX = Math.min(width - 1, Math.floor((mouseX + brushRadius) / scaleFactor));
     const startY = Math.max(0, Math.floor((mouseY - brushRadius) / scaleFactor));
     const endY = Math.min(height - 1, Math.floor((mouseY + brushRadius) / scaleFactor));
+    
+    // 网格很密时 scaleFactor 可能小于 2，原来的 scaleFactor-2 会让格子画不出来
+    const inset = scaleFactor >= 4 ? 1 : 0;
+    const cellSize = Math.max(1, scaleFactor - inset * 2);
     
     for (let x = startX; x <= endX; x++) {
         for (let y = startY; y <= endY; y++) {
@@ -1569,7 +1600,7 @@ function draw(e) {
             
             if (distance <= brushRadius) {
                 drawCtx.fillStyle = drawMode ? 'black' : 'white';
-                drawCtx.fillRect(x * scaleFactor + 1, y * scaleFactor + 1, scaleFactor - 2, scaleFactor - 2);
+                drawCtx.fillRect(x * scaleFactor + inset, y * scaleFactor + inset, cellSize, cellSize);
             }
         }
     }
@@ -1582,33 +1613,7 @@ function stopDrawing() {
 }
 
 function clearCanvas() {
-    const width = parseInt(getElement('draw-width').value);
-    const height = parseInt(getElement('draw-height').value);
-    
-    const maxCanvasSize = Math.min(
-        window.innerWidth * 0.8,
-        window.innerHeight * 0.6
-    );
-    
-    const scaleFactor = Math.min(10, maxCanvasSize / Math.max(width, height));
-    
-    drawCtx.fillStyle = 'white';
-    drawCtx.fillRect(0, 0, width * scaleFactor, height * scaleFactor);
-    
-    drawCtx.strokeStyle = '#ddd';
-    for (let i = 0; i <= width; i++) {
-        drawCtx.beginPath();
-        drawCtx.moveTo(i * scaleFactor, 0);
-        drawCtx.lineTo(i * scaleFactor, height * scaleFactor);
-        drawCtx.stroke();
-    }
-    for (let i = 0; i <= height; i++) {
-        drawCtx.beginPath();
-        drawCtx.moveTo(0, i * scaleFactor);
-        drawCtx.lineTo(width * scaleFactor, i * scaleFactor);
-        drawCtx.stroke();
-    }
-    
+    renderDrawSurface(false);
     processDrawCanvas();
 }
 
