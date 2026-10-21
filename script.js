@@ -192,6 +192,23 @@ class CanvasPool {
         }
     }
     
+    // 保证归还：中途抛异常也不会把 item 永久锁在 inUse 状态
+    withCanvas(width, height, fn) {
+        const item = this.acquire(width, height);
+        try {
+            return fn(item);
+        } finally {
+            this.release(item);
+        }
+    }
+    
+    // 清掉所有占用标记（导出被中断后残留的锁）
+    releaseAll() {
+        for (let item of this.pool) {
+            item.inUse = false;
+        }
+    }
+    
     clear() {
         for (let item of this.pool) {
             item.ctx.clearRect(0, 0, item.canvas.width, item.canvas.height);
@@ -1400,13 +1417,6 @@ function processImage() {
     binaryCanvas.width = width * scaleFactor;
     binaryCanvas.height = height * scaleFactor;
     
-    const tempCanvasItem = canvasPool.acquire(width, height);
-    const tempCtx = tempCanvasItem.ctx;
-    
-    drawSourceIntoCanvas(tempCtx, 'image', width, height);
-    
-    const imageData = tempCtx.getImageData(0, 0, width, height);
-    
     const rgbThresholds = {
         redMin: getElement('red-min').value,
         redMax: getElement('red-max').value,
@@ -1416,13 +1426,19 @@ function processImage() {
         blueMax: getElement('blue-max').value
     };
     
-    const processedImageData = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
-    
-    tempCtx.putImageData(processedImageData, 0, 0);
-    binaryCtx.imageSmoothingEnabled = false;
-    binaryCtx.drawImage(tempCanvasItem.canvas, 0, 0, width * scaleFactor, height * scaleFactor);
-    
-    canvasPool.release(tempCanvasItem);
+    const processedImageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
+        const tempCtx = tempCanvasItem.ctx;
+        drawSourceIntoCanvas(tempCtx, 'image', width, height);
+        
+        const imageData = tempCtx.getImageData(0, 0, width, height);
+        const processed = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
+        
+        tempCtx.putImageData(processed, 0, 0);
+        binaryCtx.imageSmoothingEnabled = false;
+        binaryCtx.drawImage(tempCanvasItem.canvas, 0, 0, width * scaleFactor, height * scaleFactor);
+        
+        return processed;
+    });
     
     generateCode(processedImageData, width, height);
 }
@@ -1462,13 +1478,6 @@ function processVideoFrame() {
         canvas.width = width * scaleFactor;
         canvas.height = height * scaleFactor;
         
-        const tempCanvasItem = canvasPool.acquire(width, height);
-        const tempCtx = tempCanvasItem.ctx;
-        
-        drawSourceIntoCanvas(tempCtx, 'video', width, height);
-        
-        const imageData = tempCtx.getImageData(0, 0, width, height);
-        
         const rgbThresholds = {
             redMin: getElement('video-red-min').value,
             redMax: getElement('video-red-max').value,
@@ -1478,13 +1487,19 @@ function processVideoFrame() {
             blueMax: getElement('video-blue-max').value
         };
         
-        const processedImageData = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
-        
-        tempCtx.putImageData(processedImageData, 0, 0);
-        ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(tempCanvasItem.canvas, 0, 0, width * scaleFactor, height * scaleFactor);
-        
-        canvasPool.release(tempCanvasItem);
+        const processedImageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
+            const tempCtx = tempCanvasItem.ctx;
+            drawSourceIntoCanvas(tempCtx, 'video', width, height);
+            
+            const imageData = tempCtx.getImageData(0, 0, width, height);
+            const processed = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
+            
+            tempCtx.putImageData(processed, 0, 0);
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(tempCanvasItem.canvas, 0, 0, width * scaleFactor, height * scaleFactor);
+            
+            return processed;
+        });
         
         generateCode(processedImageData, width, height);
     }
@@ -1633,32 +1648,33 @@ function processDrawCanvas() {
     
     const scaleFactor = Math.min(10, maxCanvasSize / Math.max(width, height));
     
-    const tempCanvasItem = canvasPool.acquire(width, height);
-    const tempCtx = tempCanvasItem.ctx;
-    tempCtx.drawImage(drawCanvas, 0, 0, width, height);
-    
-    const imageData = tempCtx.getImageData(0, 0, width, height);
-    
-    if (invert) {
-        const data = imageData.data;
-        for (let i = 0; i < data.length; i += 4) {
-            data[i] = 255 - data[i];
-            data[i + 1] = 255 - data[i + 1];
-            data[i + 2] = 255 - data[i + 2];
+    const imageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
+        const tempCtx = tempCanvasItem.ctx;
+        tempCtx.drawImage(drawCanvas, 0, 0, width, height);
+        
+        const pixels = tempCtx.getImageData(0, 0, width, height);
+        
+        if (invert) {
+            const data = pixels.data;
+            for (let i = 0; i < data.length; i += 4) {
+                data[i] = 255 - data[i];
+                data[i + 1] = 255 - data[i + 1];
+                data[i + 2] = 255 - data[i + 2];
+            }
         }
-    }
-    
-    const previewCanvas = getElement('draw-preview');
-    const previewCtx = previewCanvas.getContext('2d');
-    previewCanvas.width = width * scaleFactor;
-    previewCanvas.height = height * scaleFactor;
-    
-    tempCtx.putImageData(imageData, 0, 0);
-    
-    previewCtx.imageSmoothingEnabled = false;
-    previewCtx.drawImage(tempCanvasItem.canvas, 0, 0, width * scaleFactor, height * scaleFactor);
-    
-    canvasPool.release(tempCanvasItem);
+        
+        const previewCanvas = getElement('draw-preview');
+        const previewCtx = previewCanvas.getContext('2d');
+        previewCanvas.width = width * scaleFactor;
+        previewCanvas.height = height * scaleFactor;
+        
+        tempCtx.putImageData(pixels, 0, 0);
+        
+        previewCtx.imageSmoothingEnabled = false;
+        previewCtx.drawImage(tempCanvasItem.canvas, 0, 0, width * scaleFactor, height * scaleFactor);
+        
+        return pixels;
+    });
     
     generateCode(imageData, width, height);
 }
@@ -2475,6 +2491,8 @@ function exportVideo() {
     let allZipBlobs = [];
     let previousFrameData = null;
     
+    // 上一次导出被中断可能留下占用标记，先清干净
+    canvasPool.releaseAll();
     const tempCanvasItem = canvasPool.acquire(width, height);
     
     function processNextFrame() {
@@ -2672,12 +2690,6 @@ function exportRawImage() {
         const thresholdType = getElement('threshold-type').value;
         const invert = getElement('invert-checkbox').checked;
         
-        const tempCanvasItem = canvasPool.acquire(width, height);
-        const tempCtx = tempCanvasItem.ctx;
-        
-        drawSourceIntoCanvas(tempCtx, 'image', width, height);
-        
-        imageData = tempCtx.getImageData(0, 0, width, height);
         const rgbThresholds = {
             redMin: getElement('red-min').value,
             redMax: getElement('red-max').value,
@@ -2686,30 +2698,36 @@ function exportRawImage() {
             blueMin: getElement('blue-min').value,
             blueMax: getElement('blue-max').value
         };
-        imageData = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
         
-        canvasPool.release(tempCanvasItem);
+        imageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
+            const tempCtx = tempCanvasItem.ctx;
+            drawSourceIntoCanvas(tempCtx, 'image', width, height);
+            
+            const raw = tempCtx.getImageData(0, 0, width, height);
+            return processBinaryImage(raw, thresholdType, threshold, rgbThresholds, invert);
+        });
     } else if (activeMode === 'draw') {
         width = parseInt(getElement('draw-width').value) || 16;
         height = parseInt(getElement('draw-height').value) || 16;
         const invert = getElement('draw-invert-checkbox').checked;
         
-        const tempCanvasItem = canvasPool.acquire(width, height);
-        const tempCtx = tempCanvasItem.ctx;
-        tempCtx.drawImage(drawCanvas, 0, 0, width, height);
-        
-        imageData = tempCtx.getImageData(0, 0, width, height);
-        
-        if (invert) {
-            const data = imageData.data;
-            for (let i = 0; i < data.length; i += 4) {
-                data[i] = 255 - data[i];
-                data[i + 1] = 255 - data[i + 1];
-                data[i + 2] = 255 - data[i + 2];
+        imageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
+            const tempCtx = tempCanvasItem.ctx;
+            tempCtx.drawImage(drawCanvas, 0, 0, width, height);
+            
+            const pixels = tempCtx.getImageData(0, 0, width, height);
+            
+            if (invert) {
+                const data = pixels.data;
+                for (let i = 0; i < data.length; i += 4) {
+                    data[i] = 255 - data[i];
+                    data[i + 1] = 255 - data[i + 1];
+                    data[i + 2] = 255 - data[i + 2];
+                }
             }
-        }
-        
-        canvasPool.release(tempCanvasItem);
+            
+            return pixels;
+        });
     }
     
     const reverseBits = getElement('reverse-bits').checked;
@@ -2775,6 +2793,7 @@ function exportRawVideo() {
     
     const reverseBits = getElement('reverse-bits').checked;
     
+    canvasPool.releaseAll();
     const tempCanvasItem = canvasPool.acquire(width, height);
     
     function processNextRawFrame() {
