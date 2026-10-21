@@ -728,10 +728,43 @@ function packBitmapBytes(imageData, reverseBitOrder = false) {
 }
 
 // 唯一的 C 源码格式化实现
+// C 标识符清洗：数组名/宽高变量原本是自由文本，直接拼接会生成编译不过的源码
+// （实测 "my bits" / "图片位" / "1abc" / "a-b" / "W ID" 全部原样进了输出）。
+// 这里放在 formatCHeader 里，页面、视频分卷 ZIP、CLI 三条路径共用同一个出口。
+function sanitizeCIdentifier(value, fallback) {
+    const raw = String(value == null ? '' : value).trim();
+    if (!raw) return fallback;
+    let name = raw.replace(/[^0-9A-Za-z_]/g, '_');
+    if (/^[0-9]/.test(name)) name = '_' + name;
+    name = name.replace(/_+/g, '_');
+    return name === '' || name === '_' ? fallback : name;
+}
+
+// 下载文件名清洗：ZIP 子目录会带出 "v1.2/logo" 这种带斜杠的名字，
+// 部分浏览器会直接拒存或把路径截断。
+function sanitizeFileName(value, fallback) {
+    const raw = String(value == null ? '' : value).trim();
+    if (!raw) return fallback;
+    const cleaned = raw.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/^[.\s]+|[.\s]+$/g, '');
+    return cleaned || fallback;
+}
+
 function formatCHeader(bytes, options) {
-    const { width, height, arrayName, widthVar, heightVar } = options;
+    const { width, height } = options;
+    const arrayName = sanitizeCIdentifier(options.arrayName, 'image_bits');
+    const widthVar = sanitizeCIdentifier(options.widthVar, 'WIDTH');
+    const heightVar = sanitizeCIdentifier(options.heightVar, 'HEIGHT');
     const lines = [];
-    
+
+    // 改了名字要让人看见，别以为填的原始字符串生效了
+    const renames = [];
+    if (options.arrayName && options.arrayName !== arrayName) renames.push(`${options.arrayName} → ${arrayName}`);
+    if (options.widthVar && options.widthVar !== widthVar) renames.push(`${options.widthVar} → ${widthVar}`);
+    if (options.heightVar && options.heightVar !== heightVar) renames.push(`${options.heightVar} → ${heightVar}`);
+    if (renames.length > 0) {
+        lines.push(`// 标识符已修正（C 标识符只允许字母/数字/下划线，且不能以数字开头）: ${renames.join(', ')}`);
+    }
+
     if (options.layoutId) {
         const layout = getLayout(options.layoutId);
         lines.push(`// layout: ${layout.label} (${layout.hint}) ${width}x${height} ${bytes.length}B`);
@@ -1333,8 +1366,22 @@ function handleImageUpload(e) {
     loadSingleImageFromFile(files[0]);
 }
 
+// 批量上下文复位：单图导入、或新一批导入开始时都要清干净。
+// 否则上一批的 batchImages 还在：批量翻页条依然显示，点"下一张"会把新导入的单图
+// 静默换成上一批里的图，连文件名一起换掉（导出就存到别人名字下了）。
+function resetBatchState() {
+    batchImages = [];
+    imageSettings = [];
+    currentBatchIndex = 0;
+    const controls = getElement('batch-controls');
+    if (controls) controls.style.display = 'none';
+    const counter = getElement('image-counter');
+    if (counter) counter.textContent = '';
+}
+
 async function loadSingleImageFromFile(file) {
     modeStates.image.fileName = stripExtension(file.name);
+    resetBatchState();
     
     let img;
     try {
@@ -1412,7 +1459,12 @@ async function loadBatchFromZip(file) {
 }
 
 function stripExtension(name) {
-    return name.split('.').slice(0, -1).join('.');
+    // ZIP 里的条目可能带目录（imgs/a.png）；无扩展名的文件（logo）按旧写法会返回空串，
+    // 结果导出成 ".h"，文件名和默认数组名全空。
+    const base = String(name == null ? '' : name).split(/[\\/]/).pop();
+    const dot = base.lastIndexOf('.');
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    return stem || 'image';
 }
 
 // 多个文件直接拖入/选中时也走批量（input 上本来就有 multiple，之前只取了第一个）
@@ -1434,9 +1486,7 @@ async function loadBatchFromFiles(files) {
 
 // 逐张串行加载：保序、失败跳过、期间刷新计数
 async function loadBatchItems(items) {
-    batchImages = [];
-    imageSettings = [];
-    currentBatchIndex = 0;
+    resetBatchState();
     
     for (let i = 0; i < items.length; i++) {
         try {
@@ -3166,7 +3216,7 @@ function exportImage() {
         return;
     }
     
-    const fileName = getElement('file-name').value || modeStates[activeMode].fileName;
+    const fileName = sanitizeFileName(getElement('file-name').value || modeStates[activeMode].fileName, 'image');
     const blob = new Blob([code], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
