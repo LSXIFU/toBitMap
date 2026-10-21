@@ -771,7 +771,7 @@ function setupSizeAdjustment(widthInputId, heightInputId, lockRatioId, processFu
         
         if (getElement(lockRatioId).checked) {
             isUpdating = true;
-            const height = Math.round(width / aspectRatio);
+            const height = Math.max(1, Math.round(width / aspectRatio));
             getElement(heightInputId).value = height;
             isUpdating = false;
         } else {
@@ -789,7 +789,7 @@ function setupSizeAdjustment(widthInputId, heightInputId, lockRatioId, processFu
         
         if (getElement(lockRatioId).checked) {
             isUpdating = true;
-            const width = Math.round(height * aspectRatio);
+            const width = Math.max(1, Math.round(height * aspectRatio));
             getElement(widthInputId).value = width;
             isUpdating = false;
         } else {
@@ -806,7 +806,37 @@ function setupSizeAdjustment(widthInputId, heightInputId, lockRatioId, processFu
         }
     });
     
-    return { aspectRatio, isUpdating, initAspectRatio };
+    // 用访问器暴露内部状态：调用方写 aspectRatioObj.aspectRatio = w/h 必须真正落到闭包里，
+    // 否则「锁定比例」一直按初始化时的 32×32 比例换算（上传新图后垂直边算错）。
+    return {
+        get aspectRatio() {
+            return aspectRatio;
+        },
+        set aspectRatio(value) {
+            if (isFinite(value) && value > 0) {
+                aspectRatio = value;
+            }
+        },
+        get isUpdating() {
+            return isUpdating;
+        },
+        set isUpdating(value) {
+            isUpdating = Boolean(value);
+        },
+        initAspectRatio
+    };
+}
+
+// 源素材换新后，若勾着「锁定比例」，用新素材的长宽比校正短边（保持当前宽度）
+function applyLockedRatio(mode, widthInputId, heightInputId, lockRatioId) {
+    if (!getElement(lockRatioId).checked) return;
+    
+    const size = modeStates[mode].originalSize;
+    if (!size.width || !size.height) return;
+    
+    const width = parseInt(getElement(widthInputId).value) || AppConfig.defaultSize;
+    const height = Math.max(1, Math.round((width * size.height) / size.width));
+    getElement(heightInputId).value = height;
 }
 
 function scheduleProcess(processFunc) {
@@ -1064,6 +1094,8 @@ function handleImageUpload(e) {
                 imageAspectRatioObj.aspectRatio = width / height;
             }
             
+            applyLockedRatio('image', 'width-input', 'height-input', 'lock-ratio');
+            
             processImage();
         };
         img.src = event.target.result;
@@ -1170,7 +1202,10 @@ function handleVideoUpload(e) {
         if (videoAspectRatioObj) {
             videoAspectRatioObj.aspectRatio = width / height;
         }
-    });
+        
+        applyLockedRatio('video', 'video-width', 'video-height', 'video-lock-ratio');
+        processVideoFrame();
+    }, { once: true });
 }
 
 function processImage() {
