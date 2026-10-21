@@ -1659,6 +1659,31 @@ function applyImageSettings(settings) {
     getElement('dither-mode').value = settings.dither || 'none';
 }
 
+// 视频加载失败必须吭声：原来只挂 loadedmetadata，坏文件既不提示也不清场，
+// 界面还留着上一个视频的"320×240, 时长 0:02"，导出时才报"请等视频加载完成"。
+// 这个监听器在 setupEventListeners 里挂一次 —— 别在每次上传里挂，
+// 否则历史上没触发过的 once 监听器会一起被触发（实测弹两次）。
+function handleVideoError() {
+    const video = getElement('video-preview');
+    const code = video.error ? video.error.code : 0;
+    const reason = (code === 3 || code === 4) ? '格式不支持或文件已损坏' : '无法解码';
+
+    alert('视频加载失败：' + reason + '\n请换一个浏览器能播放的文件（建议 H.264 MP4 或 VP8/VP9 WebM）。');
+
+    modeStates.video.originalSize = { width: 0, height: 0 };
+    const info = getElement('video-info');
+    if (info) info.textContent = '视频加载失败：' + reason;
+    if (videoAspectRatioObj) videoAspectRatioObj.aspectRatio = 1;
+
+    const framePreview = getElement('video-frame-preview');
+    if (framePreview) {
+        framePreview.width = 1;
+        framePreview.height = 1;
+    }
+    getElement('video-selection-box').style.display = 'none';
+    modeStates.video.resultCode = '';
+}
+
 function handleVideoUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -1697,6 +1722,8 @@ function handleVideoUpload(e) {
         applyLockedRatio('video', 'video-width', 'video-height', 'video-lock-ratio');
         processVideoFrame();
     }, { once: true });
+
+
 }
 
 function processImage() {
@@ -3022,6 +3049,9 @@ function setupEventListeners() {
     getElement('export-btn').addEventListener('click', exportResult);
     
     getElement('export-raw-btn').addEventListener('click', exportRawResult);
+
+    // 视频错误只挂一次：坏文件/不支持的编码要立刻提示并清场
+    getElement('video-preview').addEventListener('error', handleVideoError);
     
     getElement('refresh-btn').addEventListener('click', refreshResult);
     
@@ -3845,9 +3875,30 @@ function updateImportPreview() {
 }
 
 // 会被文件、粘贴、切格式、改宽高四条路径复用，所以统一收在这里
+// 解析失败要清场：否则画布和统计还留着上一次成功的数据，用户会以为这次导入通过了
+function resetImportPreview(message) {
+    importState.bytes = null;
+    importState.frames = 0;
+    importState.payload = null;
+    const canvas = getElement('import-canvas');
+    const empty = getElement('import-empty');
+    const stats = getElement('import-stats');
+    if (canvas) {
+        canvas.width = 1;
+        canvas.height = 1;
+        canvas.style.display = 'none';
+    }
+    if (empty) {
+        empty.style.display = 'inline';
+        if (message) empty.textContent = message;
+    }
+    if (stats) stats.textContent = '';
+}
+
 function loadImportedData(bytes, layoutId, forcedWidth, forcedHeight) {
     if (!bytes || !bytes.length) {
         alert('没有可解析的数据');
+        resetImportPreview('解析失败：没有数据');
         return;
     }
 
@@ -3859,7 +3910,16 @@ function loadImportedData(bytes, layoutId, forcedWidth, forcedHeight) {
     let fps = 0;
     let note = '';
 
-    if (header) {
+    const userWidth = forcedWidth || parseInt(getElement('import-width').value) || 0;
+    const userHeight = forcedHeight || parseInt(getElement('import-height').value) || 0;
+
+    // 头只在「长度自洽」时采信：12 字节头 + 整数帧 × 帧长 必须刚好等于总长。
+    // 原来只要字节 8..11 落在 1..1024 就当头吃掉：裸字节流被砍掉开头、宽高和帧数全错，
+    // 而且因为 header 优先，用户在面板里改宽高也救不回来。
+    const headerFits = !!header && (bytes.length - 12) >= 0
+        && (bytes.length - 12) % layoutBufferSize(header.width, header.height, layoutId) === 0;
+
+    if (headerFits && !(userWidth && userHeight)) {
         payload = bytes.subarray(12);
         width = header.width;
         height = header.height;
@@ -3868,10 +3928,17 @@ function loadImportedData(bytes, layoutId, forcedWidth, forcedHeight) {
             note = `头声明 ${header.frames} 帧`;
         }
     } else {
-        width = forcedWidth || parseInt(getElement('import-width').value) || 0;
-        height = forcedHeight || parseInt(getElement('import-height').value) || 0;
+        payload = bytes;
+        width = userWidth;
+        height = userHeight;
+        if (header && !headerFits) {
+            note = `字节 8..11 像 .raw 头（${header.width}×${header.height}）但长度对不上，已按裸字节流解析`;
+        } else if (header && userWidth && userHeight) {
+            note = `按你填的 ${userWidth}×${userHeight} 解析（忽略头里的 ${header.width}×${header.height}）`;
+        }
         if (!width || !height) {
             alert('没读到 .raw 头（12 字节：帧数/帧率/宽/高）。\n请填宽高，或确认导入的是本工具导出的 .raw。');
+            resetImportPreview('解析失败：请填写宽高');
             return;
         }
     }
@@ -3886,6 +3953,7 @@ function loadImportedData(bytes, layoutId, forcedWidth, forcedHeight) {
     if (frames < 1) {
         alert(`数据不足：一个 ${width}×${height} 的「${layout.label}」帧需要 ${frameSize} 字节，`
             + `实际只有 ${payload.length} 字节。\n多半是格式选错了，或宽高填错了。`);
+        resetImportPreview('解析失败：数据不足');
         return;
     }
 
