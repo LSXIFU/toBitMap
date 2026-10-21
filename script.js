@@ -25,7 +25,6 @@ const modeStates = {
         heightVar: 'HEIGHT',
         resultCode: '',
         originalSize: { width: 0, height: 0 },
-        previewScale: 1,
         isRatioLocked: false,
         isOriginalRatioLocked: false,
         selectionStart: { x: 0, y: 0 },
@@ -38,7 +37,6 @@ const modeStates = {
         heightVar: 'HEIGHT',
         resultCode: '',
         originalSize: { width: 0, height: 0 },
-        previewScale: 1,
         isRatioLocked: false,
         isOriginalRatioLocked: false,
         selectionStart: { x: 0, y: 0 },
@@ -939,6 +937,65 @@ function calculatePreviewSize(originalWidth, originalHeight, maxSize) {
     return { width: previewWidth, height: previewHeight };
 }
 
+// 把「框选框相对预览容器的 CSS 像素」换算成「源素材像素」。
+// 预览元素经常被 CSS 缩放（.preview-canvas 的 max-width/max-height、#video-preview 的 max-width），
+// 直接拿 CSS 像素当 drawImage 的源矩形，会让裁剪区域整体错位、尺寸按缩放比缩水。
+function getSelectionSourceRect(mode) {
+    const selectionBox = mode === 'image' ? getElement('selection-box') : getElement('video-selection-box');
+    if (!selectionBox || selectionBox.style.display === 'none') return null;
+    
+    const preview = mode === 'image' ? getElement('source-preview') : getElement('video-preview');
+    if (!preview) return null;
+    
+    const previewRect = preview.getBoundingClientRect();
+    const state = modeStates[mode];
+    const sourceWidth = state.originalSize.width;
+    const sourceHeight = state.originalSize.height;
+    
+    if (!previewRect.width || !previewRect.height || !sourceWidth || !sourceHeight) return null;
+    
+    const containerRect = preview.parentElement.getBoundingClientRect();
+    const originX = previewRect.left - containerRect.left;
+    const originY = previewRect.top - containerRect.top;
+    
+    let left = Math.min(state.selectionStart.x, state.selectionEnd.x) - originX;
+    let top = Math.min(state.selectionStart.y, state.selectionEnd.y) - originY;
+    let right = Math.max(state.selectionStart.x, state.selectionEnd.x) - originX;
+    let bottom = Math.max(state.selectionStart.y, state.selectionEnd.y) - originY;
+    
+    left = Math.max(0, Math.min(left, previewRect.width));
+    right = Math.max(0, Math.min(right, previewRect.width));
+    top = Math.max(0, Math.min(top, previewRect.height));
+    bottom = Math.max(0, Math.min(bottom, previewRect.height));
+    
+    if (right - left < 1 || bottom - top < 1) return null;
+    
+    const scaleX = sourceWidth / previewRect.width;
+    const scaleY = sourceHeight / previewRect.height;
+    
+    return {
+        x: left * scaleX,
+        y: top * scaleY,
+        width: (right - left) * scaleX,
+        height: (bottom - top) * scaleY
+    };
+}
+
+// 按当前框选把源素材画进目标 canvas（目标尺寸 = 位图尺寸）
+function drawSourceIntoCanvas(ctx, mode, width, height) {
+    const source = mode === 'image' ? currentImage : getElement('video-preview');
+    const crop = getSelectionSourceRect(mode);
+    
+    ctx.clearRect(0, 0, width, height);
+    if (!source) return;
+    
+    if (crop) {
+        ctx.drawImage(source, crop.x, crop.y, crop.width, crop.height, 0, 0, width, height);
+    } else {
+        ctx.drawImage(source, 0, 0, width, height);
+    }
+}
+
 function generateCode(imageData, width, height) {
     const data = imageData.data;
     const bits = [];
@@ -1139,8 +1196,6 @@ function processImage() {
     sourceCtx.imageSmoothingEnabled = true;
     sourceCtx.drawImage(currentImage, 0, 0, previewSize.width, previewSize.height);
     
-    modeStates.image.previewScale = modeStates.image.originalSize.width / previewSize.width;
-    
     const binaryCanvas = getElement('binary-preview');
     const binaryCtx = binaryCanvas.getContext('2d');
     
@@ -1157,22 +1212,7 @@ function processImage() {
     const tempCanvasItem = canvasPool.acquire(width, height);
     const tempCtx = tempCanvasItem.ctx;
     
-    const selectionBox = getElement('selection-box');
-    const selectionVisible = selectionBox.style.display !== 'none';
-    if (selectionVisible) {
-        const x = Math.min(modeStates.image.selectionStart.x, modeStates.image.selectionEnd.x) * modeStates.image.previewScale;
-        const y = Math.min(modeStates.image.selectionStart.y, modeStates.image.selectionEnd.y) * modeStates.image.previewScale;
-        const selectionWidth = Math.abs(modeStates.image.selectionEnd.x - modeStates.image.selectionStart.x) * modeStates.image.previewScale;
-        const selectionHeight = Math.abs(modeStates.image.selectionEnd.y - modeStates.image.selectionStart.y) * modeStates.image.previewScale;
-        
-        tempCtx.drawImage(
-            currentImage, 
-            x, y, selectionWidth, selectionHeight, 
-            0, 0, width, height
-        );
-    } else {
-        tempCtx.drawImage(currentImage, 0, 0, width, height);
-    }
+    drawSourceIntoCanvas(tempCtx, 'image', width, height);
     
     const imageData = tempCtx.getImageData(0, 0, width, height);
     
@@ -1234,22 +1274,7 @@ function processVideoFrame() {
         const tempCanvasItem = canvasPool.acquire(width, height);
         const tempCtx = tempCanvasItem.ctx;
         
-        const videoSelectionBox = getElement('video-selection-box');
-        const selectionVisible = videoSelectionBox.style.display !== 'none';
-        if (selectionVisible) {
-            const x = Math.min(modeStates.video.selectionStart.x, modeStates.video.selectionEnd.x);
-            const y = Math.min(modeStates.video.selectionStart.y, modeStates.video.selectionEnd.y);
-            const selectionWidth = Math.abs(modeStates.video.selectionEnd.x - modeStates.video.selectionStart.x);
-            const selectionHeight = Math.abs(modeStates.video.selectionEnd.y - modeStates.video.selectionStart.y);
-            
-            tempCtx.drawImage(
-                video, 
-                x, y, selectionWidth, selectionHeight, 
-                0, 0, width, height
-            );
-        } else {
-            tempCtx.drawImage(video, 0, 0, width, height);
-        }
+        drawSourceIntoCanvas(tempCtx, 'video', width, height);
         
         const imageData = tempCtx.getImageData(0, 0, width, height);
         
@@ -2302,24 +2327,7 @@ function exportVideo() {
             video.removeEventListener('seeked', onSeeked);
             
             const tempCtx = tempCanvasItem.ctx;
-            tempCtx.clearRect(0, 0, width, height);
-            
-            const videoSelectionBox = getElement('video-selection-box');
-            const selectionVisible = videoSelectionBox.style.display !== 'none';
-            if (selectionVisible) {
-                const x = Math.min(modeStates.video.selectionStart.x, modeStates.video.selectionEnd.x);
-                const y = Math.min(modeStates.video.selectionStart.y, modeStates.video.selectionEnd.y);
-                const selectionWidth = Math.abs(modeStates.video.selectionEnd.x - modeStates.video.selectionStart.x);
-                const selectionHeight = Math.abs(modeStates.video.selectionEnd.y - modeStates.video.selectionStart.y);
-                
-                tempCtx.drawImage(
-                    video, 
-                    x, y, selectionWidth, selectionHeight, 
-                    0, 0, width, height
-                );
-            } else {
-                tempCtx.drawImage(video, 0, 0, width, height);
-            }
+            drawSourceIntoCanvas(tempCtx, 'video', width, height);
             
             const imageData = tempCtx.getImageData(0, 0, width, height);
             
@@ -2491,18 +2499,7 @@ function exportRawImage() {
         const tempCanvasItem = canvasPool.acquire(width, height);
         const tempCtx = tempCanvasItem.ctx;
         
-        const selectionBox = getElement('selection-box');
-        const selectionVisible = selectionBox.style.display !== 'none';
-        if (selectionVisible) {
-            const x = Math.min(modeStates.image.selectionStart.x, modeStates.image.selectionEnd.x) * modeStates.image.previewScale;
-            const y = Math.min(modeStates.image.selectionStart.y, modeStates.image.selectionEnd.y) * modeStates.image.previewScale;
-            const selectionWidth = Math.abs(modeStates.image.selectionEnd.x - modeStates.image.selectionStart.x) * modeStates.image.previewScale;
-            const selectionHeight = Math.abs(modeStates.image.selectionEnd.y - modeStates.image.selectionStart.y) * modeStates.image.previewScale;
-            
-            tempCtx.drawImage(currentImage, x, y, selectionWidth, selectionHeight, 0, 0, width, height);
-        } else {
-            tempCtx.drawImage(currentImage, 0, 0, width, height);
-        }
+        drawSourceIntoCanvas(tempCtx, 'image', width, height);
         
         imageData = tempCtx.getImageData(0, 0, width, height);
         const rgbThresholds = {
@@ -2619,21 +2616,7 @@ function exportRawVideo() {
             video.removeEventListener('seeked', onSeeked);
             
             const tempCtx = tempCanvasItem.ctx;
-            tempCtx.clearRect(0, 0, width, height);
-            
-            const videoSelectionBox = getElement('video-selection-box');
-            const selectionVisible = videoSelectionBox.style.display !== 'none';
-            
-            if (selectionVisible) {
-                const x = Math.min(modeStates.video.selectionStart.x, modeStates.video.selectionEnd.x);
-                const y = Math.min(modeStates.video.selectionStart.y, modeStates.video.selectionEnd.y);
-                const selectionWidth = Math.abs(modeStates.video.selectionEnd.x - modeStates.video.selectionStart.x);
-                const selectionHeight = Math.abs(modeStates.video.selectionEnd.y - modeStates.video.selectionStart.y);
-                
-                tempCtx.drawImage(video, x, y, selectionWidth, selectionHeight, 0, 0, width, height);
-            } else {
-                tempCtx.drawImage(video, 0, 0, width, height);
-            }
+            drawSourceIntoCanvas(tempCtx, 'video', width, height);
             
             const imageData = tempCtx.getImageData(0, 0, width, height);
             const rgbThresholds = {
