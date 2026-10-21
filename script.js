@@ -12,7 +12,11 @@ const AppConfig = {
     maxPreviewSize: 400,
     maxCanvasSize: 400,
     defaultSize: 32,
-    canvasPoolSize: 4
+    canvasPoolSize: 4,
+    maxBitmapSize: 1024,
+    // WebGL 分支在小位图上是负优化（readPixels 同步回读 + 逐像素翻 Y），且与 CPU 语义长期分歧。
+    // 保留实现供 A/B，默认关闭；抖动/自动阈值只能走 CPU。
+    useWebGL: false
 };
 
 const modeStates = {
@@ -84,12 +88,38 @@ function thresholdTypeToIndex(thresholdType) {
     return index === undefined ? 1 : index;
 }
 
-// CPU 二值化。与着色器同语义：'individual' 用三通道区间掩码求均，再与同一阈值比较
-// （原来这里写死 128，导致该模式下「颜色阈值」滑杆在 CPU 路径完全无效）。
-// 不就地改写传入的 ImageData，返回新的 ImageData。
-function binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, invert) {
-    const source = imageData.data;
-    const data = new Uint8ClampedArray(source);
+// 抖动矩阵：Bayer 由 1×1 递归生成（M2n = [[4Mn, 4Mn+2], [4Mn+3, 4Mn+1]]）
+function buildBayerMatrix(order) {
+    let matrix = [[0]];
+    let size = 1;
+    while (size < order) {
+        const next = [];
+        for (let y = 0; y < size * 2; y++) next.push(new Array(size * 2));
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const v = matrix[y][x] * 4;
+                next[y][x] = v;
+                next[y][x + size] = v + 2;
+                next[y + size][x] = v + 3;
+                next[y + size][x + size] = v + 1;
+            }
+        }
+        matrix = next;
+        size *= 2;
+    }
+    return matrix;
+}
+
+const BAYER_4 = buildBayerMatrix(4);
+const BAYER_8 = buildBayerMatrix(8);
+
+// 把三种阈值类型统一成「每像素一个 0~255 度量值」：
+//   rgb        = (R+G+B)/3
+//   brightness = 0.299R + 0.587G + 0.114B
+//   individual = 三通道区间掩码的均值（0 / 85 / 170 / 255）
+function buildMetricValues(imageData, thresholdType, rgbThresholds) {
+    const data = imageData.data;
+    const values = new Float32Array(data.length / 4);
     
     if (thresholdType === 'individual') {
         const redMin = parseInt(rgbThresholds.redMin);
@@ -99,44 +129,137 @@ function binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, i
         const blueMin = parseInt(rgbThresholds.blueMin);
         const blueMax = parseInt(rgbThresholds.blueMax);
         
-        for (let i = 0; i < data.length; i += 4) {
-            const r = (data[i] >= redMin && data[i] <= redMax) ? 255 : 0;
-            const g = (data[i + 1] >= greenMin && data[i + 1] <= greenMax) ? 255 : 0;
-            const b = (data[i + 2] >= blueMin && data[i + 2] <= blueMax) ? 255 : 0;
-            
-            const avg = (r + g + b) / 3;
-            let binaryValue = avg < threshold ? 0 : 255;
-            
-            if (invert) {
-                binaryValue = binaryValue === 0 ? 255 : 0;
-            }
-            
-            data[i] = binaryValue;
-            data[i + 1] = binaryValue;
-            data[i + 2] = binaryValue;
+        for (let p = 0, i = 0; i < data.length; i += 4, p++) {
+            const r = (data[i] >= redMin && data[i] <= redMax) ? 1 : 0;
+            const g = (data[i + 1] >= greenMin && data[i + 1] <= greenMax) ? 1 : 0;
+            const b = (data[i + 2] >= blueMin && data[i + 2] <= blueMax) ? 1 : 0;
+            values[p] = ((r + g + b) / 3) * 255;
         }
-    } else {
-        for (let i = 0; i < data.length; i += 4) {
-            let value;
-            if (thresholdType === 'rgb') {
-                value = (data[i] + data[i + 1] + data[i + 2]) / 3;
-            } else {
-                value = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        return values;
+    }
+    
+    const useLuminance = thresholdType !== 'rgb';
+    for (let p = 0, i = 0; i < data.length; i += 4, p++) {
+        values[p] = useLuminance
+            ? 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+            : (data[i] + data[i + 1] + data[i + 2]) / 3;
+    }
+    return values;
+}
+
+// 二值化。CPU 是唯一权威实现（与 GPU 分支曾长期不一致，见笔记）。
+// dither: 'none' | 'floyd' | 'bayer4' | 'bayer8'
+// 有序抖动把阈值中心当作亮度偏置，滑杆依然有效（128 = 经典 Bayer 观感）。
+function binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, invert, dither) {
+    const width = imageData.width;
+    const height = imageData.height;
+    const values = buildMetricValues(imageData, thresholdType, rgbThresholds);
+    const out = new Uint8ClampedArray(values.length * 4);
+    
+    if (dither === 'bayer4' || dither === 'bayer8') {
+        const matrix = dither === 'bayer4' ? BAYER_4 : BAYER_8;
+        const n = matrix.length;
+        const unit = 255 / (n * n);
+        const bias = threshold - 128;
+        
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const p = y * width + x;
+                const limit = (matrix[y % n][x % n] + 0.5) * unit;
+                let on = values[p] + bias > limit;
+                if (invert) on = !on;
+                const v = on ? 255 : 0;
+                const o = p * 4;
+                out[o] = v;
+                out[o + 1] = v;
+                out[o + 2] = v;
+                out[o + 3] = 255;
             }
-            
-            let binaryValue = value < threshold ? 0 : 255;
-            
-            if (invert) {
-                binaryValue = binaryValue === 0 ? 255 : 0;
+        }
+        return new ImageData(out, width, height);
+    }
+    
+    if (dither === 'floyd') {
+        const buf = Float32Array.from(values);
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const p = y * width + x;
+                const oldValue = buf[p];
+                const newValue = oldValue < threshold ? 0 : 255;
+                const error = oldValue - newValue;
+                buf[p] = newValue;
+                
+                if (x + 1 < width) buf[p + 1] += error * (7 / 16);
+                if (y + 1 < height) {
+                    if (x > 0) buf[p + width - 1] += error * (3 / 16);
+                    buf[p + width] += error * (5 / 16);
+                    if (x + 1 < width) buf[p + width + 1] += error * (1 / 16);
+                }
             }
-            
-            data[i] = binaryValue;
-            data[i + 1] = binaryValue;
-            data[i + 2] = binaryValue;
+        }
+        for (let p = 0; p < buf.length; p++) {
+            let on = buf[p] >= 128;
+            if (invert) on = !on;
+            const v = on ? 255 : 0;
+            const o = p * 4;
+            out[o] = v;
+            out[o + 1] = v;
+            out[o + 2] = v;
+            out[o + 3] = 255;
+        }
+        return new ImageData(out, width, height);
+    }
+    
+    for (let p = 0, o = 0; p < values.length; p++, o += 4) {
+        let on = values[p] >= threshold;
+        if (invert) on = !on;
+        const v = on ? 255 : 0;
+        out[o] = v;
+        out[o + 1] = v;
+        out[o + 2] = v;
+        out[o + 3] = 255;
+    }
+    return new ImageData(out, width, height);
+}
+
+// Otsu 最大类间方差阈值：省掉手动试 128
+function computeOtsuThreshold(imageData, thresholdType, rgbThresholds) {
+    const values = buildMetricValues(imageData, thresholdType, rgbThresholds);
+    const histogram = new Uint32Array(256);
+    
+    for (let i = 0; i < values.length; i++) {
+        const bin = Math.max(0, Math.min(255, Math.round(values[i])));
+        histogram[bin]++;
+    }
+    
+    const total = values.length;
+    let sum = 0;
+    for (let i = 0; i < 256; i++) sum += i * histogram[i];
+    
+    let sumB = 0;
+    let weightB = 0;
+    let bestThreshold = 128;
+    let bestVariance = -1;
+    
+    for (let t = 0; t < 256; t++) {
+        weightB += histogram[t];
+        if (weightB === 0) continue;
+        
+        const weightF = total - weightB;
+        if (weightF === 0) break;
+        
+        sumB += t * histogram[t];
+        const meanB = sumB / weightB;
+        const meanF = (sum - sumB) / weightF;
+        const variance = weightB * weightF * (meanB - meanF) * (meanB - meanF);
+        
+        if (variance > bestVariance) {
+            bestVariance = variance;
+            bestThreshold = t;
         }
     }
     
-    return new ImageData(data, imageData.width, imageData.height);
+    return bestThreshold;
 }
 
 class CanvasPool {
@@ -783,11 +906,77 @@ function setupRGBThresholds(redMinId, redMaxId, greenMinId, greenMaxId, blueMinI
     });
 }
 
-function processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert) {
-    if (glProcessor && glProcessor.isAvailable()) {
+function processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert, dither) {
+    const canUseGL = AppConfig.useWebGL && glProcessor && glProcessor.isAvailable();
+    const plainThreshold = !dither || dither === 'none';
+    
+    if (canUseGL && plainThreshold) {
         return glProcessor.processBinary(imageData, thresholdType, threshold, rgbThresholds, invert);
     }
-    return binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, invert);
+    return binarizeImageData(imageData, thresholdType, threshold, rgbThresholds, invert, dither);
+}
+
+// 位图尺寸夹紧：输入框允许乱填，落到 canvas 前必须夹住（过大直接 OOM/卡死）
+function readBitmapSize(elementId) {
+    const value = parseInt(getElement(elementId).value);
+    if (!isFinite(value) || value < 1) return AppConfig.defaultSize;
+    return Math.min(AppConfig.maxBitmapSize, value);
+}
+
+// RGB 区间读盘（图片 prefix '' / 视频 prefix 'video-'），原来在 4 处各抄一份
+function readRgbThresholds(prefix) {
+    return {
+        redMin: getElement(prefix + 'red-min').value,
+        redMax: getElement(prefix + 'red-max').value,
+        greenMin: getElement(prefix + 'green-min').value,
+        greenMax: getElement(prefix + 'green-max').value,
+        blueMin: getElement(prefix + 'blue-min').value,
+        blueMax: getElement(prefix + 'blue-max').value
+    };
+}
+
+function readDitherMode(prefix) {
+    const element = getElement(prefix + 'dither-mode');
+    return element ? element.value : 'none';
+}
+
+// 按当前设置把源素材渲染成目标尺寸的 ImageData（Otsu 与后续直方图预览共用）
+function captureSourceImageData(mode, width, height) {
+    return canvasPool.withCanvas(width, height, item => {
+        if (mode === 'draw') {
+            item.ctx.drawImage(drawCanvas, 0, 0, width, height);
+        } else {
+            drawSourceIntoCanvas(item.ctx, mode, width, height);
+        }
+        return item.ctx.getImageData(0, 0, width, height);
+    });
+}
+
+// 自动阈值：用当前帧/当前图的 Otsu 阈值回填滑杆
+function applyAutoThreshold(mode) {
+    const isVideo = mode === 'video';
+    const prefix = isVideo ? 'video-' : '';
+    const width = readBitmapSize(isVideo ? 'video-width' : 'width-input');
+    const height = readBitmapSize(isVideo ? 'video-height' : 'height-input');
+    
+    const imageData = captureSourceImageData(mode, width, height);
+    const threshold = computeOtsuThreshold(
+        imageData,
+        getElement(prefix + 'threshold-type').value,
+        readRgbThresholds(isVideo ? 'video-' : '')
+    );
+    
+    const slider = getElement(isVideo ? 'video-threshold' : 'threshold-input');
+    slider.value = threshold;
+    getElement(isVideo ? 'video-threshold-value' : 'threshold-value').textContent = threshold;
+    
+    if (isVideo) {
+        processVideoFrame();
+    } else if (mode === 'draw') {
+        processDrawCanvas();
+    } else {
+        processImage();
+    }
 }
 
 function calculatePreviewSize(originalWidth, originalHeight, maxSize) {
@@ -1045,7 +1234,8 @@ function createDefaultImageSettings() {
         greenMax: 255,
         blueMin: 0,
         blueMax: 255,
-        invert: false
+        invert: false,
+        dither: 'none'
     };
 }
 
@@ -1061,7 +1251,8 @@ function readImageSettingsFromUI() {
         greenMax: parseInt(getElement('green-max').value),
         blueMin: parseInt(getElement('blue-min').value),
         blueMax: parseInt(getElement('blue-max').value),
-        invert: getElement('invert-checkbox').checked
+        invert: getElement('invert-checkbox').checked,
+        dither: readDitherMode('')
     };
 }
 
@@ -1105,6 +1296,7 @@ function applyImageSettings(settings) {
     getElement('blue-max-value').textContent = settings.blueMax;
     
     getElement('invert-checkbox').checked = settings.invert;
+    getElement('dither-mode').value = settings.dither || 'none';
 }
 
 function handleVideoUpload(e) {
@@ -1149,8 +1341,8 @@ function handleVideoUpload(e) {
 function processImage() {
     if (!currentImage) return;
     
-    const width = parseInt(getElement('width-input').value) || 16;
-    const height = parseInt(getElement('height-input').value) || 16;
+    const width = readBitmapSize('width-input');
+    const height = readBitmapSize('height-input');
     const threshold = parseInt(getElement('threshold-input').value);
     const thresholdType = getElement('threshold-type').value;
     const invert = getElement('invert-checkbox').checked;
@@ -1182,21 +1374,15 @@ function processImage() {
     binaryCanvas.width = width * scaleFactor;
     binaryCanvas.height = height * scaleFactor;
     
-    const rgbThresholds = {
-        redMin: getElement('red-min').value,
-        redMax: getElement('red-max').value,
-        greenMin: getElement('green-min').value,
-        greenMax: getElement('green-max').value,
-        blueMin: getElement('blue-min').value,
-        blueMax: getElement('blue-max').value
-    };
+    const rgbThresholds = readRgbThresholds('');
+    const dither = readDitherMode('');
     
     const processedImageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
         const tempCtx = tempCanvasItem.ctx;
         drawSourceIntoCanvas(tempCtx, 'image', width, height);
         
         const imageData = tempCtx.getImageData(0, 0, width, height);
-        const processed = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
+        const processed = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert, dither);
         
         tempCtx.putImageData(processed, 0, 0);
         binaryCtx.imageSmoothingEnabled = false;
@@ -1215,8 +1401,8 @@ function processVideo() {
 function processVideoFrame() {
     if (!currentVideo) return;
     
-    const width = parseInt(getElement('video-width').value);
-    const height = parseInt(getElement('video-height').value);
+    const width = readBitmapSize('video-width');
+    const height = readBitmapSize('video-height');
     const threshold = parseInt(getElement('video-threshold').value);
     const frameRate = parseInt(getElement('frame-rate').value);
     const thresholdType = getElement('video-threshold-type').value;
@@ -1247,21 +1433,15 @@ function processVideoFrame() {
         canvas.width = width * scaleFactor;
         canvas.height = height * scaleFactor;
         
-        const rgbThresholds = {
-            redMin: getElement('video-red-min').value,
-            redMax: getElement('video-red-max').value,
-            greenMin: getElement('video-green-min').value,
-            greenMax: getElement('video-green-max').value,
-            blueMin: getElement('video-blue-min').value,
-            blueMax: getElement('video-blue-max').value
-        };
+        const rgbThresholds = readRgbThresholds('video-');
+        const dither = readDitherMode('video-');
         
         const processedImageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
             const tempCtx = tempCanvasItem.ctx;
             drawSourceIntoCanvas(tempCtx, 'video', width, height);
             
             const imageData = tempCtx.getImageData(0, 0, width, height);
-            const processed = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
+            const processed = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert, dither);
             
             tempCtx.putImageData(processed, 0, 0);
             ctx.imageSmoothingEnabled = false;
@@ -2093,6 +2273,12 @@ function setupEventListeners() {
     getElement('invert-checkbox').addEventListener('change', processImage);
     getElement('video-invert-checkbox').addEventListener('change', processVideoFrame);
     
+    getElement('dither-mode').addEventListener('change', () => scheduleProcess(processImage));
+    getElement('video-dither-mode').addEventListener('change', () => scheduleProcess(processVideoFrame));
+    
+    getElement('auto-threshold-btn').addEventListener('click', () => applyAutoThreshold('image'));
+    getElement('video-auto-threshold-btn').addEventListener('click', () => applyAutoThreshold('video'));
+    
     getElement('frame-rate').addEventListener('change', processVideo);
     
     getElement('export-btn').addEventListener('click', exportResult);
@@ -2218,8 +2404,8 @@ function exportVideo() {
     getElement('export-progress').style.display = 'block';
     
     const video = getElement('video-preview');
-    const width = parseInt(getElement('video-width').value);
-    const height = parseInt(getElement('video-height').value);
+    const width = readBitmapSize('video-width');
+    const height = readBitmapSize('video-height');
     const frameRate = parseInt(getElement('frame-rate').value);
     const threshold = parseInt(getElement('video-threshold').value);
     const thresholdType = getElement('video-threshold-type').value;
@@ -2278,16 +2464,9 @@ function exportVideo() {
             
             const imageData = tempCtx.getImageData(0, 0, width, height);
             
-            const rgbThresholds = {
-                redMin: getElement('video-red-min').value,
-                redMax: getElement('video-red-max').value,
-                greenMin: getElement('video-green-min').value,
-                greenMax: getElement('video-green-max').value,
-                blueMin: getElement('video-blue-min').value,
-                blueMax: getElement('video-blue-max').value
-            };
-            
-            const processedImageData = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
+            const processedImageData = processBinaryImage(
+                imageData, thresholdType, threshold, readRgbThresholds('video-'), invert, readDitherMode('video-')
+            );
             
             let shouldAddFrame = true;
             if (removeDuplicates && previousFrameData) {
@@ -2414,31 +2593,24 @@ function exportRawImage() {
             alert('请先上传一张图片');
             return;
         }
-        width = parseInt(getElement('width-input').value) || 16;
-        height = parseInt(getElement('height-input').value) || 16;
+        width = readBitmapSize('width-input');
+        height = readBitmapSize('height-input');
         const threshold = parseInt(getElement('threshold-input').value);
         const thresholdType = getElement('threshold-type').value;
         const invert = getElement('invert-checkbox').checked;
-        
-        const rgbThresholds = {
-            redMin: getElement('red-min').value,
-            redMax: getElement('red-max').value,
-            greenMin: getElement('green-min').value,
-            greenMax: getElement('green-max').value,
-            blueMin: getElement('blue-min').value,
-            blueMax: getElement('blue-max').value
-        };
         
         imageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
             const tempCtx = tempCanvasItem.ctx;
             drawSourceIntoCanvas(tempCtx, 'image', width, height);
             
             const raw = tempCtx.getImageData(0, 0, width, height);
-            return processBinaryImage(raw, thresholdType, threshold, rgbThresholds, invert);
+            return processBinaryImage(
+                raw, thresholdType, threshold, readRgbThresholds(''), invert, readDitherMode('')
+            );
         });
     } else if (activeMode === 'draw') {
-        width = parseInt(getElement('draw-width').value) || 16;
-        height = parseInt(getElement('draw-height').value) || 16;
+        width = readBitmapSize('draw-width');
+        height = readBitmapSize('draw-height');
         const invert = getElement('draw-invert-checkbox').checked;
         
         imageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
@@ -2500,8 +2672,8 @@ function exportRawVideo() {
     getElement('export-progress').style.display = 'block';
     
     const video = getElement('video-preview');
-    const width = parseInt(getElement('video-width').value);
-    const height = parseInt(getElement('video-height').value);
+    const width = readBitmapSize('video-width');
+    const height = readBitmapSize('video-height');
     const frameRate = parseInt(getElement('frame-rate').value);
     const threshold = parseInt(getElement('video-threshold').value);
     const thresholdType = getElement('video-threshold-type').value;
@@ -2549,15 +2721,9 @@ function exportRawVideo() {
             drawSourceIntoCanvas(tempCtx, 'video', width, height);
             
             const imageData = tempCtx.getImageData(0, 0, width, height);
-            const rgbThresholds = {
-                redMin: getElement('video-red-min').value,
-                redMax: getElement('video-red-max').value,
-                greenMin: getElement('video-green-min').value,
-                greenMax: getElement('video-green-max').value,
-                blueMin: getElement('video-blue-min').value,
-                blueMax: getElement('video-blue-max').value
-            };
-            const processedImageData = processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, invert);
+            const processedImageData = processBinaryImage(
+                imageData, thresholdType, threshold, readRgbThresholds('video-'), invert, readDitherMode('video-')
+            );
             const frameBytes = packBitmapBytes(processedImageData, reverseBits);
             
             let shouldAddFrame = true;

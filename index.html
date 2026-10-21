@@ -147,6 +147,17 @@ Github：LSXIFU
                 </div>
                 
                 <div class="setting-group">
+                    <label>抖动: </label>
+                    <select id="dither-mode">
+                        <option value="none" selected>关闭（纯阈值）</option>
+                        <option value="floyd">Floyd–Steinberg 误差扩散</option>
+                        <option value="bayer4">Bayer 4×4</option>
+                        <option value="bayer8">Bayer 8×8</option>
+                    </select>
+                    <button type="button" id="auto-threshold-btn">自动阈值</button>
+                </div>
+                
+                <div class="setting-group">
                     <input type="checkbox" id="invert-checkbox">
                     <label for="invert-checkbox">反转黑白</label>
                 </div>
@@ -253,6 +264,17 @@ Github：LSXIFU
                     <label>颜色阈值: </label>
                     <input type="range" id="video-threshold" min="0" max="255" value="128">
                     <span id="video-threshold-value">128</span>
+                </div>
+                
+                <div class="setting-group">
+                    <label>抖动: </label>
+                    <select id="video-dither-mode">
+                        <option value="none" selected>关闭（纯阈值）</option>
+                        <option value="floyd">Floyd–Steinberg 误差扩散</option>
+                        <option value="bayer4">Bayer 4×4</option>
+                        <option value="bayer8">Bayer 8×8</option>
+                    </select>
+                    <button type="button" id="video-auto-threshold-btn">自动阈值</button>
                 </div>
                 
                 <div class="setting-group">
