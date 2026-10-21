@@ -238,8 +238,9 @@ function computeOtsuThreshold(imageData, thresholdType, rgbThresholds) {
     
     let sumB = 0;
     let weightB = 0;
-    let bestThreshold = 128;
     let bestVariance = -1;
+    let bestLow = 128;
+    let bestHigh = 128;
     
     for (let t = 0; t < 256; t++) {
         weightB += histogram[t];
@@ -255,11 +256,16 @@ function computeOtsuThreshold(imageData, thresholdType, rgbThresholds) {
         
         if (variance > bestVariance) {
             bestVariance = variance;
-            bestThreshold = t;
+            bestLow = t;
+            bestHigh = t;
+        } else if (variance === bestVariance) {
+            bestHigh = t;
         }
     }
     
-    return bestThreshold;
+    // 纯双峰图（如纯黑白 logo）所有 t 的类间方差完全相同，取并列区间中点；
+    // 取第一项会得到 0，而二值化用 >= 比较，阈值 0 等于全白。
+    return Math.round((bestLow + bestHigh) / 2);
 }
 
 class CanvasPool {
@@ -1144,37 +1150,36 @@ function handleImageUpload(e) {
         return;
     }
     
-    const file = files[0];
-    modeStates.image.fileName = file.name.split('.').slice(0, -1).join('.');
+    loadSingleImageFromFile(files[0]);
+}
+
+async function loadSingleImageFromFile(file) {
+    modeStates.image.fileName = stripExtension(file.name);
     
-    const reader = new FileReader();
-    reader.onload = (event) => {
-        const img = new Image();
-        img.onload = () => {
-            if (currentImage && currentImage.src) {
-                URL.revokeObjectURL(currentImage.src);
-            }
-            currentImage = img;
-            modeStates.image.originalSize = { width: img.width, height: img.height };
-            
-            const imageInfo = getElement('image-info');
-            const width = img.width;
-            const height = img.height;
-            const aspectRatio = (width / height).toFixed(2);
-            
-            imageInfo.innerHTML = `原图信息: ${width}x${height} (${aspectRatio}:1), 24位彩色`;
-            
-            if (imageAspectRatioObj) {
-                imageAspectRatioObj.aspectRatio = width / height;
-            }
-            
-            applyLockedRatio('image', 'width-input', 'height-input', 'lock-ratio');
-            
-            processImage();
-        };
-        img.src = event.target.result;
-    };
-    reader.readAsDataURL(file);
+    let img;
+    try {
+        img = await loadImageFromBlob(file);
+    } catch (error) {
+        alert('图片解码失败：' + file.name);
+        return;
+    }
+    
+    // 换图后旧框选对不上新图，直接收起来
+    getElement('selection-box').style.display = 'none';
+    
+    currentImage = img;
+    modeStates.image.originalSize = { width: img.width, height: img.height };
+    
+    const aspectRatio = (img.width / img.height).toFixed(2);
+    getElement('image-info').innerHTML = `原图信息: ${img.width}x${img.height} (${aspectRatio}:1), 24位彩色`;
+    
+    if (imageAspectRatioObj) {
+        imageAspectRatioObj.aspectRatio = img.width / img.height;
+    }
+    
+    applyLockedRatio('image', 'width-input', 'height-input', 'lock-ratio');
+    
+    processImage();
 }
 
 function handleZipUpload(e) {
@@ -1192,6 +1197,11 @@ function handleZipUpload(e) {
 }
 
 async function loadBatchFromZip(file) {
+    if (typeof JSZip === 'undefined') {
+        alert('JSZip 未加载（vendor/jszip.min.js 缺失），压缩包导入不可用；可直接多选图片代替。');
+        return;
+    }
+    
     let zip;
     try {
         zip = await JSZip.loadAsync(file);
@@ -1376,6 +1386,7 @@ function handleVideoUpload(e) {
     currentVideo = video;
     
     video.addEventListener('loadedmetadata', function() {
+        getElement('video-selection-box').style.display = 'none';
         modeStates.video.originalSize = { width: video.videoWidth, height: video.videoHeight };
         
         const videoInfo = getElement('video-info');
@@ -2601,7 +2612,6 @@ function exportVideo() {
         
         const fileName = getElement('file-name').value || modeStates.video.fileName;
         const totalZip = new JSZip();
-        let processedZips = 0;
         
         if (allZipBlobs.length === 0) {
             isVideoExporting = false;
@@ -2612,31 +2622,25 @@ function exportVideo() {
             return;
         }
         
+        // JSZip 直接接受 Blob，原来 FileReader 转 ArrayBuffer 等于再复制一整份
         allZipBlobs.forEach((zipData) => {
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                totalZip.file(zipData.name, e.target.result);
-                processedZips++;
-                
-                if (processedZips === allZipBlobs.length) {
-                    totalZip.generateAsync({ type: 'blob' }).then(function(totalBlob) {
-                        const url = URL.createObjectURL(totalBlob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `${fileName}_frames.zip`;
-                        a.click();
-                        URL.revokeObjectURL(url);
-                        
-                        allZipBlobs = [];
-                        isVideoExporting = false;
-                        getElement('export-btn').disabled = false;
-                        getElement('cancel-export-btn').style.display = 'none';
-                        getElement('export-progress').style.display = 'none';
-                        alert('视频导出完成');
-                    });
-                }
-            };
-            reader.readAsArrayBuffer(zipData.blob);
+            totalZip.file(zipData.name, zipData.blob);
+        });
+        
+        totalZip.generateAsync({ type: 'blob' }).then(function(totalBlob) {
+            const url = URL.createObjectURL(totalBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${fileName}_frames.zip`;
+            a.click();
+            URL.revokeObjectURL(url);
+            
+            allZipBlobs = [];
+            isVideoExporting = false;
+            getElement('export-btn').disabled = false;
+            getElement('cancel-export-btn').style.display = 'none';
+            getElement('export-progress').style.display = 'none';
+            alert('视频导出完成');
         });
     }
     
