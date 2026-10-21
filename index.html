@@ -3,7 +3,7 @@
 工具原作者：栢爅
 Github：LSXIFU
 哔哩哔哩UID：402603542
-版本：1.0自用测试版 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
+版本：1.2 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
 ========================================
 -->
 <!DOCTYPE html>
@@ -11,398 +11,500 @@ Github：LSXIFU
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>图像/视频转C语言数组位图工具</title>
+    <title>位图转换器 · 图像/视频转 C 数组</title>
     <link rel="stylesheet" href="style.css">
     <script src="vendor/jszip.min.js"></script>
 </head>
 <body>
-    <div class="container">
-        <h1>图像/视频转C语言数组位图工具</h1>
-        
-        <!-- 功能选择标签页 -->
-        <div class="tabs">
-            <button class="tab-btn active" data-tab="image">图片转换</button>
-            <button class="tab-btn" data-tab="video">视频转换</button>
-            <button class="tab-btn" data-tab="draw">手绘模式</button>
-        </div>
-        
-        <!-- 图片转换标签页 -->
-        <div class="tab-content active" id="image-tab">
-            <div class="upload-section">
-                <h3>上传图片</h3>
-                <div class="upload-subsection">
-                    <h4>上传单张图片</h4>
-                    <div class="drop-area" id="image-drop-area">
-                        <p>拖放文件到此处或点击选择文件</p>
-                        <input type="file" id="image-upload" accept="image/*" multiple>
-                    </div>
-                </div>
-                <div class="upload-subsection">
-                    <h4>批量上传(压缩包)</h4>
-                    <div class="drop-area" id="zip-drop-area">
-                        <p>拖放压缩包到此处或点击选择文件</p>
-                        <input type="file" id="zip-upload" accept=".zip,application/zip">
-                    </div>
-                </div>
+    <div class="app">
+        <header class="app-header">
+            <div class="title-block">
+                <h1>位图转换器</h1>
+                <p class="subtitle">图像 / 视频 / 手绘 → 1bpp C 数组 · .raw</p>
             </div>
-            
-            <div id="batch-controls" style="display: none; margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px;">
-                <h3>批量处理</h3>
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    <button id="prev-image-btn">上一张</button>
-                    <span id="image-counter">1 / 1</span>
-                    <button id="next-image-btn">下一张</button>
-                </div>
+            <div class="header-meta">
+                <span class="badge">离线可用</span>
+                <span class="badge">PROGMEM</span>
+                <span class="badge badge-version">v1.2</span>
             </div>
-            
-            <div class="preview-section">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                    <h3>预览</h3>
-                    <div id="image-info" style="font-size: 12px; color: #666;"></div>
-                </div>
-                <div class="preview-container">
-                    <div style="position: relative;">
-                        <canvas id="source-preview" class="preview-canvas"></canvas>
-                        <div id="selection-box" style="position: absolute; border: 2px solid #4CAF50; background-color: rgba(76, 175, 80, 0.2); display: none;">
-                            <div class="selection-handle top-left"></div>
-                            <div class="selection-handle top-right"></div>
-                            <div class="selection-handle bottom-left"></div>
-                            <div class="selection-handle bottom-right"></div>
-                            <div class="selection-handle left"></div>
-                            <div class="selection-handle right"></div>
-                            <div class="selection-handle top"></div>
-                            <div class="selection-handle bottom"></div>
-                            <div class="selection-close">×</div>
-                            <div class="selection-buttons">
-                                <div class="selection-ratio">1:1</div>
-                                <div class="selection-original-ratio">原图</div>
+        </header>
+
+        <nav class="tabs" role="tablist">
+            <button class="tab-btn active" data-tab="image" role="tab">图片转换</button>
+            <button class="tab-btn" data-tab="video" role="tab">视频转换</button>
+            <button class="tab-btn" data-tab="draw" role="tab">手绘模式</button>
+        </nav>
+
+        <main>
+            <!-- ================= 图片 ================= -->
+            <section class="tab-content active" id="image-tab">
+                <div class="layout">
+                    <div class="stack">
+                        <section class="card">
+                            <div class="card-head">
+                                <h2>素材</h2>
+                                <span class="hint">拖放文件到框内，或点击选择</span>
                             </div>
-                        </div>
+
+                            <div class="drop-row">
+                                <div class="drop-area" id="image-drop-area">
+                                    <span class="drop-title">图片文件</span>
+                                    <span class="drop-sub">支持多选，多选即进入批量</span>
+                                    <input type="file" id="image-upload" accept="image/*" multiple>
+                                </div>
+                                <div class="drop-area" id="zip-drop-area">
+                                    <span class="drop-title">ZIP 压缩包</span>
+                                    <span class="drop-sub">按文件名排序后批量导入</span>
+                                    <input type="file" id="zip-upload" accept=".zip,application/zip">
+                                </div>
+                            </div>
+
+                            <div id="batch-controls" class="batch-bar" style="display: none;">
+                                <button id="prev-image-btn" class="btn btn-ghost">上一张</button>
+                                <span id="image-counter" class="counter">1 / 1</span>
+                                <button id="next-image-btn" class="btn btn-ghost">下一张</button>
+                            </div>
+
+                            <div class="preview-head">
+                                <span class="label">预览</span>
+                                <span id="image-info" class="meta"></span>
+                            </div>
+                            <div class="preview-container">
+                                <div class="canvas-frame">
+                                    <span class="canvas-label">原图</span>
+                                    <canvas id="source-preview" class="preview-canvas"></canvas>
+                                    <span class="canvas-empty">尚未载入图片</span>
+                                    <div id="selection-box">
+                                        <div class="selection-handle top-left"></div>
+                                        <div class="selection-handle top-right"></div>
+                                        <div class="selection-handle bottom-left"></div>
+                                        <div class="selection-handle bottom-right"></div>
+                                        <div class="selection-handle left"></div>
+                                        <div class="selection-handle right"></div>
+                                        <div class="selection-handle top"></div>
+                                        <div class="selection-handle bottom"></div>
+                                        <div class="selection-close">×</div>
+                                        <div class="selection-buttons">
+                                            <div class="selection-ratio">1:1</div>
+                                            <div class="selection-original-ratio">原图</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="canvas-frame">
+                                    <span class="canvas-label" id="binary-caption">1bpp 位图</span>
+                                    <canvas id="binary-preview" class="preview-canvas"></canvas>
+                                    <span class="canvas-empty">位图预览</span>
+                                </div>
+                            </div>
+                        </section>
                     </div>
-                    <canvas id="binary-preview" class="preview-canvas"></canvas>
+
+                    <aside class="stack stack-side">
+                        <section class="card">
+                            <div class="card-head">
+                                <h2>参数</h2>
+                            </div>
+
+                            <div class="field">
+                                <label for="width-input">目标尺寸</label>
+                                <div class="control">
+                                    <input type="number" id="width-input" value="32" min="1" max="1024">
+                                    <span class="sep">×</span>
+                                    <input type="number" id="height-input" value="32" min="1" max="1024">
+                                </div>
+                            </div>
+
+                            <div class="preset-row">
+                                <button class="size-btn" data-width="16" data-height="16">16</button>
+                                <button class="size-btn" data-width="32" data-height="32">32</button>
+                                <button class="size-btn" data-width="64" data-height="64">64</button>
+                                <button class="size-btn" data-width="128" data-height="128">128</button>
+                                <button class="size-btn" data-width="256" data-height="256">256</button>
+                                <button class="size-btn size-btn-wide" id="original-ratio-btn">原图比例</button>
+                            </div>
+
+                            <label class="check">
+                                <input type="checkbox" id="lock-ratio" checked>
+                                <span>锁定宽高比例</span>
+                            </label>
+
+                            <hr class="divider">
+
+                            <div class="field-col">
+                                <label class="field-label">阈值类型</label>
+                                <div class="segmented">
+                                    <button class="threshold-btn active" data-type="rgb">RGB 平均</button>
+                                    <button class="threshold-btn" data-type="brightness">亮度</button>
+                                    <button class="threshold-btn" data-type="individual">RGB 独立</button>
+                                </div>
+                                <input type="hidden" id="threshold-type" value="rgb">
+                            </div>
+
+                            <div id="rgb-thresholds" class="field-col" style="display: none;">
+                                <div class="field">
+                                    <label for="red-min">红区间</label>
+                                    <div class="control">
+                                        <input type="range" id="red-min" min="0" max="255" value="0">
+                                        <span class="value" id="red-min-value">0</span>
+                                        <input type="range" id="red-max" min="0" max="255" value="255">
+                                        <span class="value" id="red-max-value">255</span>
+                                    </div>
+                                </div>
+                                <div class="field">
+                                    <label for="green-min">绿区间</label>
+                                    <div class="control">
+                                        <input type="range" id="green-min" min="0" max="255" value="0">
+                                        <span class="value" id="green-min-value">0</span>
+                                        <input type="range" id="green-max" min="0" max="255" value="255">
+                                        <span class="value" id="green-max-value">255</span>
+                                    </div>
+                                </div>
+                                <div class="field">
+                                    <label for="blue-min">蓝区间</label>
+                                    <div class="control">
+                                        <input type="range" id="blue-min" min="0" max="255" value="0">
+                                        <span class="value" id="blue-min-value">0</span>
+                                        <input type="range" id="blue-max" min="0" max="255" value="255">
+                                        <span class="value" id="blue-max-value">255</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div id="single-threshold" class="field">
+                                <label for="threshold-input">颜色阈值</label>
+                                <div class="control">
+                                    <input type="range" id="threshold-input" min="0" max="255" value="128">
+                                    <span class="value value-accent" id="threshold-value">128</span>
+                                </div>
+                            </div>
+
+                            <div class="field-col">
+                                <label class="field-label" for="dither-mode">抖动</label>
+                                <div class="control">
+                                    <select id="dither-mode">
+                                        <option value="none" selected>关闭（纯阈值）</option>
+                                        <option value="floyd">Floyd–Steinberg 误差扩散</option>
+                                        <option value="bayer4">Bayer 4×4 有序</option>
+                                        <option value="bayer8">Bayer 8×8 有序</option>
+                                    </select>
+                                    <button type="button" class="btn btn-ghost" id="auto-threshold-btn">自动阈值</button>
+                                </div>
+                                <p class="field-hint">自动阈值按当前图的直方图取 Otsu 分割点；抖动模式下阈值仍作为亮度偏置。</p>
+                            </div>
+
+                            <label class="check">
+                                <input type="checkbox" id="invert-checkbox">
+                                <span>反转黑白</span>
+                            </label>
+                        </section>
+                    </aside>
+                </div>
+            </section>
+
+            <!-- ================= 视频 ================= -->
+            <section class="tab-content" id="video-tab">
+                <div class="layout">
+                    <div class="stack">
+                        <section class="card">
+                            <div class="card-head">
+                                <h2>素材</h2>
+                                <span class="hint">逐帧抓取导出，支持框选局部</span>
+                            </div>
+
+                            <div class="drop-row">
+                                <div class="drop-area" id="video-drop-area">
+                                    <span class="drop-title">视频文件</span>
+                                    <span class="drop-sub">mp4 / webm，导出时暂停取帧</span>
+                                    <input type="file" id="video-upload" accept="video/*">
+                                </div>
+                            </div>
+
+                            <div class="preview-head">
+                                <span class="label">原片</span>
+                                <span id="video-info" class="meta"></span>
+                            </div>
+                            <div class="canvas-frame canvas-frame-video">
+                                <span class="canvas-label">原片</span>
+                                <video id="video-preview" controls></video>
+                                <span class="canvas-empty">尚未载入视频</span>
+                                <div id="video-selection-box">
+                                    <div class="selection-handle top-left"></div>
+                                    <div class="selection-handle top-right"></div>
+                                    <div class="selection-handle bottom-left"></div>
+                                    <div class="selection-handle bottom-right"></div>
+                                    <div class="selection-handle left"></div>
+                                    <div class="selection-handle right"></div>
+                                    <div class="selection-handle top"></div>
+                                    <div class="selection-handle bottom"></div>
+                                    <div class="selection-close">×</div>
+                                    <div class="selection-buttons">
+                                        <div class="video-selection-ratio">1:1</div>
+                                        <div class="video-selection-original-ratio">原图</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="preview-head">
+                                <span class="label">预览</span>
+                            </div>
+                            <div class="canvas-frame">
+                                <span class="canvas-label" id="video-frame-caption">1bpp 位图</span>
+                                <canvas id="video-frame-preview" class="preview-canvas"></canvas>
+                                <span class="canvas-empty">拖动时间轴查看</span>
+                            </div>
+                        </section>
+                    </div>
+
+                    <aside class="stack stack-side">
+                        <section class="card">
+                            <div class="card-head">
+                                <h2>参数</h2>
+                            </div>
+
+                            <div class="field">
+                                <label for="video-width">目标尺寸</label>
+                                <div class="control">
+                                    <input type="number" id="video-width" value="16" min="1" max="1024">
+                                    <span class="sep">×</span>
+                                    <input type="number" id="video-height" value="16" min="1" max="1024">
+                                </div>
+                            </div>
+
+                            <div class="preset-row">
+                                <button class="video-size-btn" data-width="16" data-height="16">16</button>
+                                <button class="video-size-btn" data-width="32" data-height="32">32</button>
+                                <button class="video-size-btn" data-width="64" data-height="64">64</button>
+                                <button class="video-size-btn" data-width="128" data-height="128">128</button>
+                                <button class="video-size-btn" data-width="256" data-height="256">256</button>
+                                <button class="video-size-btn size-btn-wide" id="video-original-ratio-btn">原图比例</button>
+                            </div>
+
+                            <label class="check">
+                                <input type="checkbox" id="video-lock-ratio" checked>
+                                <span>锁定宽高比例</span>
+                            </label>
+
+                            <hr class="divider">
+
+                            <div class="field-col">
+                                <label class="field-label">阈值类型</label>
+                                <div class="segmented">
+                                    <button class="video-threshold-btn active" data-type="rgb">RGB 平均</button>
+                                    <button class="video-threshold-btn" data-type="brightness">亮度</button>
+                                    <button class="video-threshold-btn" data-type="individual">RGB 独立</button>
+                                </div>
+                                <input type="hidden" id="video-threshold-type" value="rgb">
+                            </div>
+
+                            <div id="video-rgb-thresholds" class="field-col" style="display: none;">
+                                <div class="field">
+                                    <label for="video-red-min">红区间</label>
+                                    <div class="control">
+                                        <input type="range" id="video-red-min" min="0" max="255" value="0">
+                                        <span class="value" id="video-red-min-value">0</span>
+                                        <input type="range" id="video-red-max" min="0" max="255" value="255">
+                                        <span class="value" id="video-red-max-value">255</span>
+                                    </div>
+                                </div>
+                                <div class="field">
+                                    <label for="video-green-min">绿区间</label>
+                                    <div class="control">
+                                        <input type="range" id="video-green-min" min="0" max="255" value="0">
+                                        <span class="value" id="video-green-min-value">0</span>
+                                        <input type="range" id="video-green-max" min="0" max="255" value="255">
+                                        <span class="value" id="video-green-max-value">255</span>
+                                    </div>
+                                </div>
+                                <div class="field">
+                                    <label for="video-blue-min">蓝区间</label>
+                                    <div class="control">
+                                        <input type="range" id="video-blue-min" min="0" max="255" value="0">
+                                        <span class="value" id="video-blue-min-value">0</span>
+                                        <input type="range" id="video-blue-max" min="0" max="255" value="255">
+                                        <span class="value" id="video-blue-max-value">255</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div id="video-single-threshold" class="field">
+                                <label for="video-threshold">颜色阈值</label>
+                                <div class="control">
+                                    <input type="range" id="video-threshold" min="0" max="255" value="128">
+                                    <span class="value value-accent" id="video-threshold-value">128</span>
+                                </div>
+                            </div>
+
+                            <div class="field-col">
+                                <label class="field-label" for="video-dither-mode">抖动</label>
+                                <div class="control">
+                                    <select id="video-dither-mode">
+                                        <option value="none" selected>关闭（纯阈值）</option>
+                                        <option value="floyd">Floyd–Steinberg 误差扩散</option>
+                                        <option value="bayer4">Bayer 4×4 有序</option>
+                                        <option value="bayer8">Bayer 8×8 有序</option>
+                                    </select>
+                                    <button type="button" class="btn btn-ghost" id="video-auto-threshold-btn">自动阈值</button>
+                                </div>
+                            </div>
+
+                            <div class="field">
+                                <label for="frame-rate">帧率</label>
+                                <div class="control">
+                                    <select id="frame-rate">
+                                        <option value="1">1 fps</option>
+                                        <option value="5">5 fps</option>
+                                        <option value="10">10 fps</option>
+                                        <option value="24" selected>24 fps</option>
+                                        <option value="30">30 fps</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="field">
+                                <label for="frames-per-zip">每包帧数</label>
+                                <div class="control">
+                                    <input type="number" id="frames-per-zip" value="300" min="1">
+                                    <span class="unit">帧 / 包</span>
+                                </div>
+                            </div>
+
+                            <label class="check">
+                                <input type="checkbox" id="remove-duplicates">
+                                <span>去掉重复帧</span>
+                            </label>
+                            <label class="check">
+                                <input type="checkbox" id="video-invert-checkbox">
+                                <span>反转黑白</span>
+                            </label>
+                        </section>
+                    </aside>
+                </div>
+            </section>
+
+            <!-- ================= 手绘 ================= -->
+            <section class="tab-content" id="draw-tab">
+                <div class="layout">
+                    <div class="stack">
+                        <section class="card">
+                            <div class="card-head">
+                                <h2>手绘板</h2>
+                                <span class="hint">按住拖动逐格绘制，支持触屏</span>
+                            </div>
+                            <div class="draw-controls">
+                                <button id="draw-btn" class="btn btn-ghost active">绘制</button>
+                                <button id="erase-btn" class="btn btn-ghost">橡皮</button>
+                                <button id="clear-btn" class="btn btn-ghost">清空</button>
+                                <span class="label">笔触</span>
+                                <input type="range" id="brush-size" min="1" max="5" value="1">
+                                <span class="value value-accent" id="brush-size-value">1</span>
+                            </div>
+                            <div class="canvas-frame canvas-frame-draw">
+                                <canvas id="draw-canvas"></canvas>
+                            </div>
+                        </section>
+                    </div>
+
+                    <aside class="stack stack-side">
+                        <section class="card">
+                            <div class="card-head">
+                                <h2>参数</h2>
+                            </div>
+                            <div class="field">
+                                <label for="draw-width">画布大小</label>
+                                <div class="control">
+                                    <input type="number" id="draw-width" value="16" min="1" max="1024">
+                                    <span class="sep">×</span>
+                                    <input type="number" id="draw-height" value="16" min="1" max="1024">
+                                </div>
+                            </div>
+                            <label class="check">
+                                <input type="checkbox" id="draw-invert-checkbox">
+                                <span>反转黑白</span>
+                            </label>
+                            <div class="preview-head">
+                                <span class="label">预览</span>
+                            </div>
+                            <div class="canvas-frame">
+                                <canvas id="draw-preview" class="preview-canvas"></canvas>
+                            </div>
+                        </section>
+                    </aside>
+                </div>
+            </section>
+        </main>
+
+        <!-- ================= 导出 ================= -->
+        <section class="card">
+            <div class="card-head">
+                <h2>导出</h2>
+                <span class="hint">C 数组用于 PROGMEM；.raw 带 12 字节头（帧数 / 帧率 / 宽 / 高）</span>
+            </div>
+
+            <div class="export-grid">
+                <div class="field-col">
+                    <label class="field-label" for="file-name">文件名</label>
+                    <input type="text" id="file-name" class="export-input" placeholder="默认使用原文件名">
+                </div>
+                <div class="field-col">
+                    <label class="field-label" for="array-name">数组名</label>
+                    <input type="text" id="array-name" class="export-input" placeholder="默认 image_bits">
+                </div>
+                <div class="field-col">
+                    <label class="field-label" for="width-var">宽度变量</label>
+                    <input type="text" id="width-var" class="export-input" placeholder="默认 WIDTH">
+                </div>
+                <div class="field-col">
+                    <label class="field-label" for="height-var">高度变量</label>
+                    <input type="text" id="height-var" class="export-input" placeholder="默认 HEIGHT">
                 </div>
             </div>
-            
-            <div class="settings-section">
-                <h3>设置</h3>
-                <div class="setting-group">
-                    <label>目标大小: </label>
-                    <input type="number" id="width-input" value="32" min="1">
-                    <span>×</span>
-                    <input type="number" id="height-input" value="32" min="1">
-                    <label style="margin-left: 10px;">
-                        <input type="checkbox" id="lock-ratio" checked> 锁定比例
-                    </label>
-                    <div style="margin-left: 10px; display: flex; gap: 5px;">
-                        <button class="size-btn" data-width="16" data-height="16">16×16</button>
-                        <button class="size-btn" data-width="32" data-height="32">32×32</button>
-                        <button class="size-btn" data-width="64" data-height="64">64×64</button>
-                        <button class="size-btn" data-width="128" data-height="128">128×128</button>
-                        <button class="size-btn" data-width="256" data-height="256">256×256</button>
-                        <button class="size-btn" id="original-ratio-btn">原图比例</button>
-                    </div>
-                </div>
-                
-                <div class="setting-group">
-                    <label>阈值类型: </label>
-                    <div class="threshold-type-buttons">
-                        <button class="threshold-btn active" data-type="rgb">RGB平均值</button>
-                        <button class="threshold-btn" data-type="brightness">亮度</button>
-                        <button class="threshold-btn" data-type="individual">RGB独立调整</button>
-                    </div>
-                    <input type="hidden" id="threshold-type" value="rgb">
-                </div>
-                
-                <div id="rgb-thresholds" style="display: none;">
-                    <div class="setting-group">
-                        <label>红色区间: </label>
-                        <input type="range" id="red-min" min="0" max="255" value="0">
-                        <span id="red-min-value">0</span>
-                        <span>~</span>
-                        <input type="range" id="red-max" min="0" max="255" value="255">
-                        <span id="red-max-value">255</span>
-                    </div>
-                    <div class="setting-group">
-                        <label>绿色区间: </label>
-                        <input type="range" id="green-min" min="0" max="255" value="0">
-                        <span id="green-min-value">0</span>
-                        <span>~</span>
-                        <input type="range" id="green-max" min="0" max="255" value="255">
-                        <span id="green-max-value">255</span>
-                    </div>
-                    <div class="setting-group">
-                        <label>蓝色区间: </label>
-                        <input type="range" id="blue-min" min="0" max="255" value="0">
-                        <span id="blue-min-value">0</span>
-                        <span>~</span>
-                        <input type="range" id="blue-max" min="0" max="255" value="255">
-                        <span id="blue-max-value">255</span>
-                    </div>
-                </div>
-                
-                <div id="single-threshold" class="setting-group">
-                    <label>颜色阈值: </label>
-                    <input type="range" id="threshold-input" min="0" max="255" value="128">
-                    <span id="threshold-value">128</span>
-                </div>
-                
-                <div class="setting-group">
-                    <label>抖动: </label>
-                    <select id="dither-mode">
-                        <option value="none" selected>关闭（纯阈值）</option>
-                        <option value="floyd">Floyd–Steinberg 误差扩散</option>
-                        <option value="bayer4">Bayer 4×4</option>
-                        <option value="bayer8">Bayer 8×8</option>
-                    </select>
-                    <button type="button" id="auto-threshold-btn">自动阈值</button>
-                </div>
-                
-                <div class="setting-group">
-                    <input type="checkbox" id="invert-checkbox">
-                    <label for="invert-checkbox">反转黑白</label>
-                </div>
-            </div>
-        </div>
-        
-        <!-- 视频转换标签页 -->
-        <div class="tab-content" id="video-tab">
-            <div class="upload-section">
-                <h3>上传视频</h3>
-                <div class="upload-subsection">
-                    <h4>上传视频文件</h4>
-                    <div class="drop-area" id="video-drop-area">
-                        <p>拖放文件到此处或点击选择文件</p>
-                        <input type="file" id="video-upload" accept="video/*">
-                    </div>
-                </div>
-            </div>
-            
-            <div class="preview-section">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                    <h3>预览</h3>
-                    <div id="video-info" style="font-size: 12px; color: #666;"></div>
-                </div>
-                <div style="position: relative;">
-                    <video id="video-preview" controls></video>
-                    <div id="video-selection-box" style="position: absolute; border: 2px solid #4CAF50; background-color: rgba(76, 175, 80, 0.2); display: none;">
-                        <div class="selection-handle top-left"></div>
-                        <div class="selection-handle top-right"></div>
-                        <div class="selection-handle bottom-left"></div>
-                        <div class="selection-handle bottom-right"></div>
-                        <div class="selection-handle left"></div>
-                        <div class="selection-handle right"></div>
-                        <div class="selection-handle top"></div>
-                        <div class="selection-handle bottom"></div>
-                        <div class="selection-close">×</div>
-                        <div class="selection-buttons">
-                            <div class="video-selection-ratio">1:1</div>
-                            <div class="video-selection-original-ratio">原图</div>
-                        </div>
-                    </div>
-                </div>
-                <canvas id="video-frame-preview" class="preview-canvas"></canvas>
-            </div>
-            
-            <div class="settings-section">
-                <h3>设置</h3>
-                <div class="setting-group">
-                    <label>目标大小: </label>
-                    <input type="number" id="video-width" value="16" min="1">
-                    <span>×</span>
-                    <input type="number" id="video-height" value="16" min="1">
-                    <label style="margin-left: 10px;">
-                        <input type="checkbox" id="video-lock-ratio" checked> 锁定比例
-                    </label>
-                    <div style="margin-left: 10px; display: flex; gap: 5px;">
-                        <button class="video-size-btn" data-width="16" data-height="16">16×16</button>
-                        <button class="video-size-btn" data-width="32" data-height="32">32×32</button>
-                        <button class="video-size-btn" data-width="64" data-height="64">64×64</button>
-                        <button class="video-size-btn" data-width="128" data-height="128">128×128</button>
-                        <button class="video-size-btn" data-width="256" data-height="256">256×256</button>
-                        <button class="video-size-btn" id="video-original-ratio-btn">原图比例</button>
-                    </div>
-                </div>
-                
-                <div class="setting-group">
-                    <label>阈值类型: </label>
-                    <div class="threshold-type-buttons">
-                        <button class="video-threshold-btn active" data-type="rgb">RGB平均值</button>
-                        <button class="video-threshold-btn" data-type="brightness">亮度</button>
-                        <button class="video-threshold-btn" data-type="individual">RGB独立调整</button>
-                    </div>
-                    <input type="hidden" id="video-threshold-type" value="rgb">
-                </div>
-                
-                <div id="video-rgb-thresholds" style="display: none;">
-                    <div class="setting-group">
-                        <label>红色区间: </label>
-                        <input type="range" id="video-red-min" min="0" max="255" value="0">
-                        <span id="video-red-min-value">0</span>
-                        <span>~</span>
-                        <input type="range" id="video-red-max" min="0" max="255" value="255">
-                        <span id="video-red-max-value">255</span>
-                    </div>
-                    <div class="setting-group">
-                        <label>绿色区间: </label>
-                        <input type="range" id="video-green-min" min="0" max="255" value="0">
-                        <span id="video-green-min-value">0</span>
-                        <span>~</span>
-                        <input type="range" id="video-green-max" min="0" max="255" value="255">
-                        <span id="video-green-max-value">255</span>
-                    </div>
-                    <div class="setting-group">
-                        <label>蓝色区间: </label>
-                        <input type="range" id="video-blue-min" min="0" max="255" value="0">
-                        <span id="video-blue-min-value">0</span>
-                        <span>~</span>
-                        <input type="range" id="video-blue-max" min="0" max="255" value="255">
-                        <span id="video-blue-max-value">255</span>
-                    </div>
-                </div>
-                
-                <div id="video-single-threshold" class="setting-group">
-                    <label>颜色阈值: </label>
-                    <input type="range" id="video-threshold" min="0" max="255" value="128">
-                    <span id="video-threshold-value">128</span>
-                </div>
-                
-                <div class="setting-group">
-                    <label>抖动: </label>
-                    <select id="video-dither-mode">
-                        <option value="none" selected>关闭（纯阈值）</option>
-                        <option value="floyd">Floyd–Steinberg 误差扩散</option>
-                        <option value="bayer4">Bayer 4×4</option>
-                        <option value="bayer8">Bayer 8×8</option>
-                    </select>
-                    <button type="button" id="video-auto-threshold-btn">自动阈值</button>
-                </div>
-                
-                <div class="setting-group">
-                    <label>帧率选择: </label>
-                    <select id="frame-rate">
-                        <option value="1">1fps</option>
-                        <option value="5">5fps</option>
-                        <option value="10">10fps</option>
-                        <option value="24" selected>24fps</option>
-                        <option value="30">30fps</option>
-                    </select>
-                </div>
-                
-                <div class="setting-group">
-                    <input type="checkbox" id="remove-duplicates">
-                    <label for="remove-duplicates">去掉重复帧</label>
-                </div>
-                
-                <div class="setting-group">
-                    <input type="checkbox" id="video-invert-checkbox">
-                    <label for="video-invert-checkbox">反转黑白</label>
-                </div>
-                
-                <div class="setting-group">
-                    <label>每压缩包帧数: </label>
-                    <input type="number" id="frames-per-zip" value="300" min="1">
-                    <span>帧</span>
-                </div>
-            </div>
-        </div>
-        
-        <!-- 手绘模式标签页 -->
-        <div class="tab-content" id="draw-tab">
-            <div class="draw-section">
-                <h3>手绘板</h3>
-                <div class="draw-controls">
-                    <button id="draw-btn" class="active">绘制</button>
-                    <button id="erase-btn">橡皮擦</button>
-                    <button id="clear-btn">清空</button>
-                    <label>笔触大小: </label>
-                    <input type="range" id="brush-size" min="1" max="5" value="1">
-                    <span id="brush-size-value">1</span>
-                </div>
-                <canvas id="draw-canvas"></canvas>
-            </div>
-            
-            <div class="preview-section">
-                <h3>预览</h3>
-                <canvas id="draw-preview" class="preview-canvas"></canvas>
-            </div>
-            
-            <div class="settings-section">
-                <h3>设置</h3>
-                <div class="setting-group">
-                    <label>画布大小: </label>
-                    <input type="number" id="draw-width" value="16" min="1">
-                    <span>×</span>
-                    <input type="number" id="draw-height" value="16" min="1">
-                </div>
-                <div class="setting-group">
-                    <input type="checkbox" id="draw-invert-checkbox">
-                    <label for="draw-invert-checkbox">反转黑白</label>
-                </div>
-            </div>
-        </div>
-        
-        <!-- 导出设置 -->
-        <div class="export-section">
-            <h3>导出设置</h3>
-            <div style="display: flex; gap: 20px; margin-bottom: 10px;">
-                <div class="setting-group" style="flex: 1;">
-                    <label>文件名: </label>
-                    <input type="text" id="file-name" placeholder="默认使用原文件名" class="export-input">
-                </div>
-                <div class="setting-group" style="flex: 1;">
-                    <label>宽度变量名: </label>
-                    <input type="text" id="width-var" placeholder="默认: WIDTH" class="export-input">
-                </div>
-            </div>
-            
-            <div style="display: flex; gap: 20px; margin-bottom: 10px;">
-                <div class="setting-group" style="flex: 1;">
-                    <label>数组名: </label>
-                    <input type="text" id="array-name" placeholder="默认: image_bits" class="export-input">
-                </div>
-                <div class="setting-group" style="flex: 1;">
-                    <label>高度变量名: </label>
-                    <input type="text" id="height-var" placeholder="默认: HEIGHT" class="export-input">
-                </div>
-            </div>
-            
-            <div style="display: flex; gap: 10px; align-items: center;">
-                <button id="refresh-btn">刷新</button>
-                <button id="export-btn">导出C代码</button>
-                <button id="export-raw-btn">导出Raw文件</button>
-                <button id="cancel-export-btn" style="display: none; background-color: #f44336; color: white;">终止导出</button>
-                <div class="setting-group" style="margin-bottom: 0; margin-left: 10px;">
+
+            <div class="action-row">
+                <button id="export-btn" class="btn btn-primary">导出 C 代码</button>
+                <button id="export-raw-btn" class="btn btn-primary">导出 Raw</button>
+                <button id="refresh-btn" class="btn btn-ghost">刷新预览</button>
+                <button id="cancel-export-btn" class="btn btn-danger" style="display: none;">终止导出</button>
+                <label class="check check-right">
                     <input type="checkbox" id="reverse-bits">
-                    <label for="reverse-bits">反转位序（修复画面错位问题）</label>
+                    <span>反转位序（修复画面错位）</span>
+                </label>
+            </div>
+
+            <div id="export-progress" class="progress" style="display: none;">
+                <div class="progress-track"><div id="progress-bar"></div></div>
+                <div class="progress-meta">
+                    <span>正在逐帧转换…</span>
+                    <span id="progress-text" class="counter" aria-live="polite">0/0 帧</span>
                 </div>
             </div>
-            <div id="export-progress" style="display: none; margin-top: 10px; padding: 10px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9;">
-                <p>正在转换视频...请稍候</p>
-                <div style="width: 100%; background-color: #e0e0e0; border-radius: 5px;">
-                    <div id="progress-bar" style="width: 0%; height: 10px; background-color: #4CAF50; border-radius: 5px;"></div>
+        </section>
+
+        <!-- ================= 结果 ================= -->
+        <section class="card">
+            <div class="card-head">
+                <h2>生成的代码</h2>
+                <div class="card-head-right">
+                    <span id="result-stats" class="stats" aria-live="polite"></span>
+                    <button id="copy-code-btn" class="btn btn-ghost btn-sm">复制源码</button>
                 </div>
-                <p id="progress-text" style="margin-top: 5px; font-size: 12px;">0/0 帧</p>
             </div>
-        </div>
-        
-        <!-- 结果显示 -->
-        <div class="result-section">
-            <div class="result-head">
-                <h3>生成的代码</h3>
-                <div id="result-stats" class="result-stats"></div>
-            </div>
-            <pre id="result-code"></pre>
-        </div>
-        
-        <!-- 作者信息 -->
-        <div class="author-info" style="text-align: center; margin-top: 30px; padding: 20px; background-color: #f5f5f5; border-radius: 5px; font-size: 12px; color: #666;">
-            <p><strong>工具原作者：</strong>栢爅</p>
-            <p><strong>Github：</strong>LSXIFU</p>
-            <p><strong>哔哩哔哩UID：</strong>402603542</p>
-            <p><strong>版本：</strong>1.0自用测试版 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者</p>
-        </div>
+            <details class="result-body" open>
+                <summary>展开 / 收起源码</summary>
+                <pre id="result-code"></pre>
+            </details>
+        </section>
+
+        <footer class="app-footer">
+            <span>原作者 栢爅</span>
+            <span class="sep-dot">·</span>
+            <span>Github LSXIFU</span>
+            <span class="sep-dot">·</span>
+            <span>B 站 UID 402603542</span>
+            <span class="sep-dot">·</span>
+            <span>免费自用 / 禁止商用 / 转载请署名</span>
+        </footer>
     </div>
-    
+
     <script src="script.js"></script>
 </body>
 </html>

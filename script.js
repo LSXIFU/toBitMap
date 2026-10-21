@@ -9,10 +9,12 @@ Github：LSXIFU
 */
 
 const AppConfig = {
-    maxPreviewSize: 400,
+    maxPreviewSize: 800,
     maxCanvasSize: 400,
     defaultSize: 32,
     canvasPoolSize: 4,
+    // 小位图放大上限：16x16 原来只有 160px，看不清也画不准
+    maxPreviewZoom: 24,
     maxBitmapSize: 1024,
     // WebGL 分支在小位图上是负优化（readPixels 同步回读 + 逐像素翻 Y），且与 CPU 语义长期分歧。
     // 保留实现供 A/B，默认关闭；抖动/自动阈值只能走 CPU。
@@ -730,6 +732,7 @@ function setupTabs() {
             getElement(`${tab}-tab`).classList.add('active');
             
             getElement('result-code').textContent = modeStates[activeMode].resultCode;
+            getElement('result-stats').textContent = modeStates[activeMode].resultStats || '';
             getElement('file-name').value = modeStates[activeMode].fileName;
             getElement('array-name').value = modeStates[activeMode].arrayName;
             getElement('width-var').value = modeStates[activeMode].widthVar;
@@ -1137,8 +1140,17 @@ function updateResultStats(width, height) {
     const bytesPerRow = Math.ceil(width / 8);
     const totalBytes = bytesPerRow * height;
     const sourceKB = (modeStates[activeMode].resultCode.length / 1024).toFixed(1);
+    const text = `${width}×${height} · ${bytesPerRow} B/行 · 共 ${totalBytes} B · 源码 ${sourceKB} KB · 行优先 MSB`;
     
-    stats.textContent = `${width}×${height} · ${bytesPerRow} B/行 · 共 ${totalBytes} B · 源码 ${sourceKB} KB · 行优先 MSB`;
+    // 统计跟模式走：切 Tab 后不能还挂着上一个模式的尺寸
+    modeStates[activeMode].resultStats = text;
+    stats.textContent = text;
+    
+    // 位图角标标出实际分辨率，两张预览才分得清哪张是哪张
+    const caption = getElement(activeMode === 'video' ? 'video-frame-caption' : 'binary-caption');
+    if (caption) {
+        caption.textContent = `1bpp 位图 · ${width}×${height}`;
+    }
 }
 
 function handleImageUpload(e) {
@@ -1275,7 +1287,7 @@ async function loadBatchItems(items) {
         return;
     }
     
-    getElement('batch-controls').style.display = 'block';
+    getElement('batch-controls').style.display = 'flex';
     showBatchImage(0);
 }
 
@@ -1443,7 +1455,7 @@ function processImage() {
         window.innerHeight * 0.6
     );
     
-    const scaleFactor = Math.min(10, maxCanvasSize / Math.max(width, height));
+    const scaleFactor = Math.min(AppConfig.maxPreviewZoom, maxCanvasSize / Math.max(width, height));
     
     binaryCanvas.width = width * scaleFactor;
     binaryCanvas.height = height * scaleFactor;
@@ -1502,7 +1514,7 @@ function processVideoFrame() {
             window.innerHeight * 0.6
         );
         
-        const scaleFactor = Math.min(10, maxCanvasSize / Math.max(width, height));
+        const scaleFactor = Math.min(AppConfig.maxPreviewZoom, maxCanvasSize / Math.max(width, height));
         
         canvas.width = width * scaleFactor;
         canvas.height = height * scaleFactor;
@@ -1540,7 +1552,7 @@ function getDrawScaleFactor(width, height) {
         window.innerWidth * 0.8,
         window.innerHeight * 0.6
     );
-    return Math.min(10, maxCanvasSize / Math.max(width, height));
+    return Math.min(AppConfig.maxPreviewZoom, maxCanvasSize / Math.max(width, height));
 }
 
 // 改画布尺寸就把画作清空太粗暴：先把旧画面截下来，按比例铺回新画布
@@ -1669,7 +1681,7 @@ function processDrawCanvas() {
         window.innerHeight * 0.6
     );
     
-    const scaleFactor = Math.min(10, maxCanvasSize / Math.max(width, height));
+    const scaleFactor = Math.min(AppConfig.maxPreviewZoom, maxCanvasSize / Math.max(width, height));
     
     const imageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
         const tempCtx = tempCanvasItem.ctx;
@@ -2357,6 +2369,8 @@ function setupEventListeners() {
     
     getElement('reverse-bits').addEventListener('change', refreshCodeNow);
     
+    getElement('copy-code-btn').addEventListener('click', copyResultCode);
+    
     getElement('export-btn').addEventListener('click', exportResult);
     
     getElement('export-raw-btn').addEventListener('click', exportRawResult);
@@ -2442,6 +2456,21 @@ function refreshResult() {
     }
 }
 
+async function copyResultCode() {
+    refreshCodeNow();
+    const code = modeStates[activeMode].resultCode || '';
+    const button = getElement('copy-code-btn');
+    
+    try {
+        await navigator.clipboard.writeText(code);
+        button.textContent = '已复制';
+    } catch (error) {
+        button.textContent = '复制失败';
+    }
+    
+    setTimeout(() => { button.textContent = '复制源码'; }, 1200);
+}
+
 function exportResult() {
     if (activeMode === 'video') {
         exportVideo();
@@ -2477,7 +2506,7 @@ function exportVideo() {
     isVideoExporting = true;
     cancelVideoExport = false;
     getElement('export-btn').disabled = true;
-    getElement('cancel-export-btn').style.display = 'inline-block';
+    getElement('cancel-export-btn').style.display = 'inline-flex';
     getElement('export-progress').style.display = 'block';
     
     const video = getElement('video-preview');
@@ -2738,7 +2767,7 @@ function exportRawVideo() {
     isRawExporting = true;
     cancelRawExport = false;
     getElement('export-raw-btn').disabled = true;
-    getElement('cancel-export-btn').style.display = 'inline-block';
+    getElement('cancel-export-btn').style.display = 'inline-flex';
     getElement('export-progress').style.display = 'block';
     
     const video = getElement('video-preview');
