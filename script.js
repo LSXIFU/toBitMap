@@ -3,7 +3,7 @@
 工具原作者：栢爅
 Github：LSXIFU
 哔哩哔哩UID：402603542
-版本：1.4 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
+版本：1.5 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
 优化内容：GPU加速、内存管理优化、Web Worker支持
 ========================================
 */
@@ -2636,6 +2636,20 @@ function setupEventListeners() {
     getElement('draw-invert-checkbox').addEventListener('change', processDrawCanvas);
     
     setupImportPanel();
+    setupCaptureMode();
+}
+
+// 浏览器不支持 requestVideoFrameCallback 时明确告知，而不是让它悄悄退回 seek
+function setupCaptureMode() {
+    const select = getElement('capture-mode');
+    if (!select) return;
+    if (supportsFrameCallback()) return;
+    const option = select.querySelector('option[value="rvfc"]');
+    if (option) {
+        option.disabled = true;
+        option.textContent = '快速（本浏览器不支持，已退回精确）';
+    }
+    select.value = 'seek';
 }
 
 function showPrevImage() {
@@ -2675,6 +2689,194 @@ async function copyResultCode() {
     setTimeout(() => { button.textContent = '复制源码'; }, 1200);
 }
 
+
+// ===== 视频抓帧：两种方式同一个回调 =====
+// seek：逐帧 seek 到目标时刻再抓。时间准，但每帧一次解码 seek，长视频慢到不能用。
+// rvfc：静音播放 + requestVideoFrameCallback，按解码帧的 PTS 采样，快一个量级。
+// 两种方式都只负责“给出帧”，二值化/编码/打包由调用方在 onFrame 里做。
+const CAPTURE_PLAYBACK_RATE = 4;
+const CAPTURE_STALL_MS = 4000;
+
+function supportsFrameCallback() {
+    const video = document.getElementById('video-preview');
+    return !!(video && typeof video.requestVideoFrameCallback === 'function');
+}
+
+function getCaptureMode() {
+    const select = document.getElementById('capture-mode');
+    const wanted = select ? select.value : 'seek';
+    if (wanted === 'rvfc' && !supportsFrameCallback()) return 'seek';
+    return wanted === 'rvfc' ? 'rvfc' : 'seek';
+}
+
+function updateExportProgress(done, total) {
+    const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+    getElement('progress-bar').style.width = percent + '%';
+    getElement('progress-text').textContent = `${done}/${total} 帧`;
+}
+
+function beginFrameExport(buttonId) {
+    getElement(buttonId).disabled = true;
+    getElement('cancel-export-btn').style.display = 'inline-flex';
+    getElement('export-progress').style.display = 'block';
+    updateExportProgress(0, 1);
+}
+
+function endFrameExport(buttonId) {
+    getElement(buttonId).disabled = false;
+    getElement('cancel-export-btn').style.display = 'none';
+    getElement('export-progress').style.display = 'none';
+}
+
+// seek 到位后必须等“新帧真的呈现出来”再抓：pause 状态下 seeked 触发时，
+// decoder 呈现到画布可能还晚一拍，getImageData 会读到上一帧（同参数两次导出哈希不同就是这么来的）。
+// rVFC 是唯一可靠的“帧已呈现”信号；没有它就退回 seeked 事件。
+function waitForFramePresented(video, targetTime) {
+    const sameTime = !video.seeking && Math.abs(video.currentTime - targetTime) < 1e-6;
+
+    if (typeof video.requestVideoFrameCallback !== 'function') {
+        return new Promise(resolve => seekFrame(video, targetTime, resolve));
+    }
+
+    return new Promise(resolve => {
+        let settled = false;
+        let handle = null;
+        let timer = null;
+
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            if (handle !== null && typeof video.cancelVideoFrameCallback === 'function') {
+                video.cancelVideoFrameCallback(handle);
+            }
+            clearTimeout(timer);
+            resolve();
+        };
+
+        handle = video.requestVideoFrameCallback(finish);
+        // 同帧重复 seek 时不会再呈现新帧 → 两帧后放行；再兜一道 500ms，绝不挂死
+        if (sameTime) requestAnimationFrame(() => requestAnimationFrame(finish));
+        timer = setTimeout(finish, 500);
+        video.currentTime = targetTime;
+    });
+}
+
+// 逐帧 seek 抓取指定区间（rvfc 播放先结束时也用它补齐尾部，绝不静默少帧）
+async function captureFramesBySeek(options, fromIndex, totalFrames) {
+    const video = options.video;
+    const frameRate = options.frameRate;
+    const lastTime = Math.max(0, video.duration - 0.001);
+    let done = fromIndex;
+    video.pause();
+
+    for (let index = fromIndex; index < totalFrames; index++) {
+        if (options.isCancelled()) return { frames: done, cancelled: true };
+        const targetTime = Math.min(index / frameRate, lastTime);
+        await waitForFramePresented(video, targetTime);
+        await options.onFrame(index, totalFrames);
+        done = index + 1;
+        if (options.onProgress) options.onProgress(done, totalFrames);
+    }
+
+    return { frames: done, cancelled: false };
+}
+
+async function captureVideoFrames(options) {
+    const video = options.video;
+    const frameRate = options.frameRate;
+    const totalFrames = Math.max(1, Math.ceil(video.duration * frameRate));
+
+    if (options.mode !== 'rvfc' || typeof video.requestVideoFrameCallback !== 'function') {
+        return await captureFramesBySeek(options, 0, totalFrames);
+    }
+
+    const wasMuted = video.muted;
+    const wasRate = video.playbackRate;
+    video.pause();
+    video.muted = true;
+    try {
+        video.currentTime = 0;
+    } catch (error) {
+        // 元数据未就绪时个别浏览器会抛，直接 play() 会从头开始
+    }
+    video.playbackRate = CAPTURE_PLAYBACK_RATE;
+
+    let onEnded = null;
+
+    const outcome = await new Promise(resolve => {
+        let nextIndex = 0;
+        let handle = null;
+        let settled = false;
+        let stalledTimer = null;
+
+        const stopPlayback = () => {
+            if (handle !== null && typeof video.cancelVideoFrameCallback === 'function') {
+                video.cancelVideoFrameCallback(handle);
+                handle = null;
+            }
+            video.pause();
+            video.muted = wasMuted;
+            video.playbackRate = wasRate;
+        };
+
+        const settle = (reason) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(stalledTimer);
+            stopPlayback();
+            resolve({ reason: reason, nextIndex: nextIndex });
+        };
+
+        const armStallGuard = () => {
+            clearTimeout(stalledTimer);
+            stalledTimer = setTimeout(() => settle('stalled'), CAPTURE_STALL_MS);
+        };
+
+        const onVideoFrame = async (now, metadata) => {
+            if (settled) return;
+            if (options.isCancelled()) { settle('cancelled'); return; }
+
+            const mediaTime = metadata && typeof metadata.mediaTime === 'number'
+                ? metadata.mediaTime
+                : video.currentTime;
+
+            // 同一个解码帧覆盖所有已到点的目标时刻（源帧率低于导出帧率时就是重复帧）
+            while (nextIndex < totalFrames && mediaTime + 1e-4 >= nextIndex / frameRate) {
+                const index = nextIndex++;
+                await options.onFrame(index, totalFrames);
+                if (options.onProgress) options.onProgress(nextIndex, totalFrames);
+                if (options.isCancelled()) { settle('cancelled'); return; }
+            }
+
+            if (nextIndex >= totalFrames) { settle('done'); return; }
+            if (video.ended || mediaTime >= video.duration - 1e-3) { settle('ended'); return; }
+
+            armStallGuard();
+            handle = video.requestVideoFrameCallback(onVideoFrame);
+        };
+
+        onEnded = () => settle('ended');
+        video.addEventListener('ended', onEnded, { once: true });
+
+        armStallGuard();
+        handle = video.requestVideoFrameCallback(onVideoFrame);
+
+        const playing = video.play();
+        if (playing && typeof playing.catch === 'function') {
+            playing.catch(() => settle('playblocked'));
+        }
+    });
+
+    if (onEnded) video.removeEventListener('ended', onEnded);
+
+    if (outcome.reason === 'cancelled') return { frames: outcome.nextIndex, cancelled: true };
+    if (outcome.nextIndex >= totalFrames) return { frames: totalFrames, cancelled: false };
+
+    // 播放先结束 / 解码跟不上 / 自动播放被拦：剩下的帧退回 seek 补齐
+    const tail = await captureFramesBySeek(options, outcome.nextIndex, totalFrames);
+    return { frames: tail.frames, cancelled: tail.cancelled, filledBySeek: true };
+}
+
 function exportResult() {
     if (activeMode === 'video') {
         exportVideo();
@@ -2701,18 +2903,12 @@ function exportImage() {
     URL.revokeObjectURL(url);
 }
 
-function exportVideo() {
+async function exportVideo() {
     if (!currentVideo) {
         alert('请先上传一个视频');
         return;
     }
-    
-    isVideoExporting = true;
-    cancelVideoExport = false;
-    getElement('export-btn').disabled = true;
-    getElement('cancel-export-btn').style.display = 'inline-flex';
-    getElement('export-progress').style.display = 'block';
-    
+
     const video = getElement('video-preview');
     const width = readBitmapSize('video-width');
     const height = readBitmapSize('video-height');
@@ -2722,164 +2918,116 @@ function exportVideo() {
     const invert = getElement('video-invert-checkbox').checked;
     const removeDuplicates = getElement('remove-duplicates').checked;
     const framesPerZip = Math.max(1, parseInt(getElement('frames-per-zip').value) || 300);
-    
+    const layoutId = getOutputLayout();
+
     if (!isFinite(video.duration) || video.duration <= 0) {
         alert('视频时长无效，请等视频加载完成后再导出');
         return;
     }
-    
-    // 导出期间暂停播放：timeupdate/seeked 的预览处理会与逐帧抓取抢同一块临时 canvas
-    video.pause();
-    
-    const totalFrames = Math.max(1, Math.ceil(video.duration * frameRate));
-    let processedFrames = 0;
-    let currentFrame = 0;
+
+    isVideoExporting = true;
+    cancelVideoExport = false;
+    beginFrameExport('export-btn');
+
+    const fileName = getElement('file-name').value || modeStates.video.fileName;
     let frameNumber = 1;
     let zipNumber = 1;
     let currentZipFrames = [];
     let allZipBlobs = [];
     let previousFrameData = null;
-    const layoutId = getOutputLayout();
-    
+
     // 上一次导出被中断可能留下占用标记，先清干净
     canvasPool.releaseAll();
     const tempCanvasItem = canvasPool.acquire(width, height);
-    
-    function processNextFrame() {
-        if (cancelVideoExport) {
-            isVideoExporting = false;
-            canvasPool.release(tempCanvasItem);
-            getElement('export-btn').disabled = false;
-            getElement('cancel-export-btn').style.display = 'none';
-            getElement('export-progress').style.display = 'none';
-            return;
-        }
-        
-        if (currentFrame >= totalFrames) {
-            if (currentZipFrames.length > 0) {
-                packageCurrentZip(() => {
-                    packageTotalZip();
-                });
-            } else {
-                packageTotalZip();
-            }
-            return;
-        }
-        
-        const currentTime = currentFrame / frameRate;
-        
-        seekFrame(video, currentTime, function() {
-            
-            const tempCtx = tempCanvasItem.ctx;
-            drawSourceIntoCanvas(tempCtx, 'video', width, height);
-            
-            const imageData = tempCtx.getImageData(0, 0, width, height);
-            
-            const processedImageData = processBinaryImage(
-                imageData, thresholdType, threshold, readRgbThresholds('video-'), invert, readDitherMode('video-')
-            );
-            
-            let shouldAddFrame = true;
-            if (removeDuplicates && previousFrameData) {
-                const currentData = processedImageData.data;
-                const prevData = previousFrameData.data;
-                
-                for (let i = 0; i < currentData.length; i++) {
-                    if (currentData[i] !== prevData[i]) {
-                        shouldAddFrame = true;
-                        break;
-                    }
-                    shouldAddFrame = false;
-                }
-            }
-            
-            if (shouldAddFrame) {
-                const code = formatCHeader(encodeBitmap(processedImageData, layoutId), {
-                    layoutId: layoutId,
-                    width: width,
-                    height: height,
-                    arrayName: getElement('array-name').value || 'image_bits',
-                    widthVar: getElement('width-var').value || 'WIDTH',
-                    heightVar: getElement('height-var').value || 'HEIGHT'
-                });
-                
-                currentZipFrames.push({ frame: frameNumber, code: code });
-                frameNumber++;
-                
-                previousFrameData = processedImageData;
-            }
-            
-            processedFrames++;
-            const progress = Math.round((processedFrames / totalFrames) * 100);
-            getElement('progress-bar').style.width = `${progress}%`;
-            getElement('progress-text').textContent = `${processedFrames}/${totalFrames} 帧`;
-            
-            if (currentZipFrames.length >= framesPerZip) {
-                packageCurrentZip(() => {
-                    currentZipFrames = [];
-                    zipNumber++;
-                    currentFrame++;
-                    processNextFrame();
-                });
-            } else {
-                currentFrame++;
-                processNextFrame();
-            }
-        });
-    }
-    
-    function packageCurrentZip(callback) {
-        const fileName = getElement('file-name').value || modeStates.video.fileName;
+
+    async function packageCurrentZip() {
+        if (currentZipFrames.length === 0) return;
         const zip = new JSZip();
-        
         currentZipFrames.forEach((frameData) => {
             zip.file(`${fileName}_${frameData.frame}.h`, frameData.code);
         });
-        
-        zip.generateAsync({ type: 'blob' }).then(function(blob) {
-            allZipBlobs.push({ name: `${fileName}_frames_${zipNumber}.zip`, blob: blob });
-            callback();
-        });
+        const blob = await zip.generateAsync({ type: 'blob' });
+        allZipBlobs.push({ name: `${fileName}_frames_${zipNumber}.zip`, blob: blob });
+        currentZipFrames = [];
+        zipNumber++;
     }
-    
-    function packageTotalZip() {
-        canvasPool.release(tempCanvasItem);
-        
-        const fileName = getElement('file-name').value || modeStates.video.fileName;
-        const totalZip = new JSZip();
-        
+
+    async function packageTotalZip() {
         if (allZipBlobs.length === 0) {
-            isVideoExporting = false;
-            getElement('export-btn').disabled = false;
-            getElement('cancel-export-btn').style.display = 'none';
-            getElement('export-progress').style.display = 'none';
             alert('视频导出完成（无帧数据）');
             return;
         }
-        
+        const totalZip = new JSZip();
         // JSZip 直接接受 Blob，原来 FileReader 转 ArrayBuffer 等于再复制一整份
-        allZipBlobs.forEach((zipData) => {
-            totalZip.file(zipData.name, zipData.blob);
-        });
-        
-        totalZip.generateAsync({ type: 'blob' }).then(function(totalBlob) {
-            const url = URL.createObjectURL(totalBlob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `${fileName}_frames.zip`;
-            a.click();
-            URL.revokeObjectURL(url);
-            
-            allZipBlobs = [];
-            isVideoExporting = false;
-            getElement('export-btn').disabled = false;
-            getElement('cancel-export-btn').style.display = 'none';
-            getElement('export-progress').style.display = 'none';
-            alert('视频导出完成');
-        });
+        allZipBlobs.forEach((zipData) => totalZip.file(zipData.name, zipData.blob));
+        const totalBlob = await totalZip.generateAsync({ type: 'blob' });
+
+        const url = URL.createObjectURL(totalBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${fileName}_frames.zip`;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        allZipBlobs = [];
+        alert('视频导出完成');
     }
-    
-    processNextFrame();
+
+    try {
+        const result = await captureVideoFrames({
+            video: video,
+            frameRate: frameRate,
+            mode: getCaptureMode(),
+            isCancelled: () => cancelVideoExport,
+            onProgress: updateExportProgress,
+            onFrame: async function() {
+                const tempCtx = tempCanvasItem.ctx;
+                drawSourceIntoCanvas(tempCtx, 'video', width, height);
+
+                const imageData = tempCtx.getImageData(0, 0, width, height);
+                const processedImageData = processBinaryImage(
+                    imageData, thresholdType, threshold, readRgbThresholds('video-'), invert, readDitherMode('video-')
+                );
+
+                let shouldAddFrame = true;
+                if (removeDuplicates && previousFrameData) {
+                    const currentData = processedImageData.data;
+                    const prevData = previousFrameData.data;
+                    shouldAddFrame = false;
+                    for (let i = 0; i < currentData.length; i++) {
+                        if (currentData[i] !== prevData[i]) {
+                            shouldAddFrame = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (shouldAddFrame) {
+                    const code = formatCHeader(encodeBitmap(processedImageData, layoutId), {
+                        layoutId: layoutId,
+                        width: width,
+                        height: height,
+                        arrayName: getElement('array-name').value || 'image_bits',
+                        widthVar: getElement('width-var').value || 'WIDTH',
+                        heightVar: getElement('height-var').value || 'HEIGHT'
+                    });
+                    currentZipFrames.push({ frame: frameNumber, code: code });
+                    frameNumber++;
+                    previousFrameData = processedImageData;
+                }
+
+                if (currentZipFrames.length >= framesPerZip) await packageCurrentZip();
+            }
+        });
+
+        if (result.cancelled) return;
+        await packageCurrentZip();
+        await packageTotalZip();
+    } finally {
+        canvasPool.release(tempCanvasItem);
+        isVideoExporting = false;
+        endFrameExport('export-btn');
+    }
 }
 
 function exportRawResult() {
@@ -2964,18 +3112,12 @@ function exportRawImage() {
     alert(`Raw文件导出完成\n文件名：\n- 分辨率：${width}x${height}\n- 帧数：${totalFrames}\n- 帧率：${fps}fps\n- 输出格式：${getLayout(layoutId).label}`);
 }
 
-function exportRawVideo() {
+async function exportRawVideo() {
     if (!currentVideo) {
         alert('请先上传一个视频');
         return;
     }
-    
-    isRawExporting = true;
-    cancelRawExport = false;
-    getElement('export-raw-btn').disabled = true;
-    getElement('cancel-export-btn').style.display = 'inline-flex';
-    getElement('export-progress').style.display = 'block';
-    
+
     const video = getElement('video-preview');
     const width = readBitmapSize('video-width');
     const height = readBitmapSize('video-height');
@@ -2984,97 +3126,83 @@ function exportRawVideo() {
     const thresholdType = getElement('video-threshold-type').value;
     const invert = getElement('video-invert-checkbox').checked;
     const removeDuplicates = getElement('remove-duplicates').checked;
-    
+    const layoutId = getOutputLayout();
+
     if (!isFinite(video.duration) || video.duration <= 0) {
         alert('视频时长无效，请等视频加载完成后再导出');
         return;
     }
-    
-    video.pause();
-    
-    const totalFrames = Math.max(1, Math.ceil(video.duration * frameRate));
-    let processedFrames = 0;
-    let currentFrame = 0;
+
+    isRawExporting = true;
+    cancelRawExport = false;
+    beginFrameExport('export-raw-btn');
+
     let allFrameData = [];
     let previousFrameBytes = null;
-    
-    const layoutId = getOutputLayout();
-    
+    let releasedByFinish = false;
+
     canvasPool.releaseAll();
     const tempCanvasItem = canvasPool.acquire(width, height);
-    
-    function processNextRawFrame() {
-        if (cancelRawExport) {
-            isRawExporting = false;
-            canvasPool.release(tempCanvasItem);
-            getElement('export-raw-btn').disabled = false;
-            getElement('cancel-export-btn').style.display = 'none';
-            getElement('export-progress').style.display = 'none';
-            return;
-        }
-        
-        if (currentFrame >= totalFrames) {
-            finishRawExport(width, height, frameRate, allFrameData, layoutId, tempCanvasItem);
-            return;
-        }
-        
-        const currentTime = currentFrame / frameRate;
-        
-        seekFrame(video, currentTime, function() {
-            
-            const tempCtx = tempCanvasItem.ctx;
-            drawSourceIntoCanvas(tempCtx, 'video', width, height);
-            
-            const imageData = tempCtx.getImageData(0, 0, width, height);
-            const processedImageData = processBinaryImage(
-                imageData, thresholdType, threshold, readRgbThresholds('video-'), invert, readDitherMode('video-')
-            );
-            const frameBytes = encodeBitmap(processedImageData, layoutId);
-            
-            let shouldAddFrame = true;
-            
-            if (removeDuplicates && previousFrameBytes) {
-                shouldAddFrame = false;
-                for (let i = 0; i < frameBytes.length; i++) {
-                    if (frameBytes[i] !== previousFrameBytes[i]) {
-                        shouldAddFrame = true;
-                        break;
+
+    try {
+        const result = await captureVideoFrames({
+            video: video,
+            frameRate: frameRate,
+            mode: getCaptureMode(),
+            isCancelled: () => cancelRawExport,
+            onProgress: updateExportProgress,
+            onFrame: async function() {
+                const tempCtx = tempCanvasItem.ctx;
+                drawSourceIntoCanvas(tempCtx, 'video', width, height);
+
+                const imageData = tempCtx.getImageData(0, 0, width, height);
+                const processedImageData = processBinaryImage(
+                    imageData, thresholdType, threshold, readRgbThresholds('video-'), invert, readDitherMode('video-')
+                );
+                const frameBytes = encodeBitmap(processedImageData, layoutId);
+
+                let shouldAddFrame = true;
+                if (removeDuplicates && previousFrameBytes) {
+                    shouldAddFrame = false;
+                    for (let i = 0; i < frameBytes.length; i++) {
+                        if (frameBytes[i] !== previousFrameBytes[i]) {
+                            shouldAddFrame = true;
+                            break;
+                        }
                     }
                 }
+
+                if (shouldAddFrame) {
+                    allFrameData.push(frameBytes);
+                    previousFrameBytes = frameBytes;
+                }
             }
-            
-            if (shouldAddFrame) {
-                allFrameData.push(frameBytes);
-                previousFrameBytes = frameBytes;
-            }
-            
-            processedFrames++;
-            const progress = Math.round((processedFrames / totalFrames) * 100);
-            getElement('progress-bar').style.width = `${progress}%`;
-            getElement('progress-text').textContent = `${processedFrames}/${totalFrames} 帧`;
-            
-            currentFrame++;
-            processNextRawFrame();
         });
+
+        if (result.cancelled) return;
+        releasedByFinish = true;
+        finishRawExport(width, height, frameRate, allFrameData, layoutId, tempCanvasItem);
+    } finally {
+        if (!releasedByFinish) canvasPool.release(tempCanvasItem);
+        isRawExporting = false;
+        endFrameExport('export-raw-btn');
     }
-    
-    processNextRawFrame();
 }
 
 function finishRawExport(width, height, fps, allFrameData, layoutId, tempCanvasItem) {
     if (tempCanvasItem) {
         canvasPool.release(tempCanvasItem);
     }
-    
+
     const totalFrames = allFrameData.length;
-    
+
     const header = packRawHeader(totalFrames, fps, width, height);
-    
+
     let totalDataSize = 0;
     for (const frameData of allFrameData) {
         totalDataSize += frameData.length;
     }
-    
+
     const rawData = new Uint8Array(header.length + totalDataSize);
     rawData.set(header, 0);
     let offset = header.length;
@@ -3082,10 +3210,10 @@ function finishRawExport(width, height, fps, allFrameData, layoutId, tempCanvasI
         rawData.set(frameData, offset);
         offset += frameData.length;
     }
-    
+
     const baseName = getElement('file-name').value || modeStates.video.fileName;
     const filename = generateRawFilename(baseName, width, height, fps, totalFrames);
-    
+
     const blob = new Blob([rawData], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -3093,17 +3221,9 @@ function finishRawExport(width, height, fps, allFrameData, layoutId, tempCanvasI
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-    
-    allFrameData = [];
-    
-    isRawExporting = false;
-    getElement('export-raw-btn').disabled = false;
-    getElement('cancel-export-btn').style.display = 'none';
-    getElement('export-progress').style.display = 'none';
-    
+
     alert(`Raw视频导出完成！\n\n- 分辨率：${width}x${height}\n- 帧数：${totalFrames}\n- 帧率：${fps}fps\n- 输出格式：${getLayout(layoutId).label}`);
 }
-
 
 // ===== 反导入：位流 -> 预览（自检闭环）=====
 // 判据不是「字节好看」，而是能不能解回来看到图：格式选错时预览立刻错位/成雪花。

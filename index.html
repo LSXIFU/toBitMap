@@ -3,7 +3,7 @@
 工具原作者：栢爅
 Github：LSXIFU
 哔哩哔哩UID：402603542
-版本：1.4 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
+版本：1.5 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
 ========================================
 -->
 <!DOCTYPE html>
@@ -25,7 +25,7 @@ Github：LSXIFU
             <div class="header-meta">
                 <span class="badge">离线可用</span>
                 <span class="badge">PROGMEM</span>
-                <span class="badge badge-version">v1.4</span>
+                <span class="badge badge-version">v1.5</span>
             </div>
         </header>
 
@@ -356,6 +356,16 @@ Github：LSXIFU
                                         <option value="10">10 fps</option>
                                         <option value="24" selected>24 fps</option>
                                         <option value="30">30 fps</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="field">
+                                <label for="capture-mode">抓帧方式</label>
+                                <div class="control">
+                                    <select id="capture-mode" title="精确：逐帧 seek，可复现（1080p 约 200ms/帧）；快速：按播放呈现的帧取帧，实测 7× 但每次结果会有细微差异">
+                                        <option value="seek" selected>精确（逐帧 seek，可复现）</option>
+                                        <option value="rvfc">快速（播放抓帧 · 不可复现）</option>
                                     </select>
                                 </div>
                             </div>
