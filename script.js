@@ -1873,6 +1873,20 @@ function setupVideoSelectionEvents() {
     });
 }
 
+function setSelectionHandlesVisible(mode, visible, sideOnly) {
+    const selectionBox = mode === 'image' ? getElement('selection-box') : getElement('video-selection-box');
+    if (!selectionBox) return;
+    
+    // 必须限定在本模式的框选盒内：用全文档选择器会把另一个模式的手柄一起改掉
+    const selector = sideOnly
+        ? '.selection-handle.left, .selection-handle.right, .selection-handle.top, .selection-handle.bottom'
+        : '.selection-handle';
+    
+    selectionBox.querySelectorAll(selector).forEach(el => {
+        el.style.display = visible ? 'block' : 'none';
+    });
+}
+
 function toggleRatioLock(mode) {
     modeStates[mode].isRatioLocked = !modeStates[mode].isRatioLocked;
     modeStates[mode].isOriginalRatioLocked = false;
@@ -1889,25 +1903,10 @@ function toggleRatioLock(mode) {
         ratioBtn.classList.add('locked');
         originalRatioBtn.classList.remove('locked');
         
-        if (mode === 'image') {
-            getElements('.selection-handle.left').forEach(el => el.style.display = 'none');
-            getElements('.selection-handle.right').forEach(el => el.style.display = 'none');
-            getElements('.selection-handle.top').forEach(el => el.style.display = 'none');
-            getElements('.selection-handle.bottom').forEach(el => el.style.display = 'none');
-        } else {
-            getElement('video-selection-box').querySelectorAll('.selection-handle.left').forEach(el => el.style.display = 'none');
-            getElement('video-selection-box').querySelectorAll('.selection-handle.right').forEach(el => el.style.display = 'none');
-            getElement('video-selection-box').querySelectorAll('.selection-handle.top').forEach(el => el.style.display = 'none');
-            getElement('video-selection-box').querySelectorAll('.selection-handle.bottom').forEach(el => el.style.display = 'none');
-        }
+        setSelectionHandlesVisible(mode, false, true);
     } else {
         ratioBtn.classList.remove('locked');
-        
-        if (mode === 'image') {
-            getElements('.selection-handle').forEach(el => el.style.display = 'block');
-        } else {
-            getElement('video-selection-box').querySelectorAll('.selection-handle').forEach(el => el.style.display = 'block');
-        }
+        setSelectionHandlesVisible(mode, true);
     }
 }
 
@@ -1960,17 +1959,7 @@ function toggleOriginalRatioLock(mode) {
             originalRatioBtn.classList.add('locked');
             ratioBtn.classList.remove('locked');
             
-            if (mode === 'image') {
-                getElements('.selection-handle.left').forEach(el => el.style.display = 'none');
-                getElements('.selection-handle.right').forEach(el => el.style.display = 'none');
-                getElements('.selection-handle.top').forEach(el => el.style.display = 'none');
-                getElements('.selection-handle.bottom').forEach(el => el.style.display = 'none');
-            } else {
-                getElement('video-selection-box').querySelectorAll('.selection-handle.left').forEach(el => el.style.display = 'none');
-                getElement('video-selection-box').querySelectorAll('.selection-handle.right').forEach(el => el.style.display = 'none');
-                getElement('video-selection-box').querySelectorAll('.selection-handle.top').forEach(el => el.style.display = 'none');
-                getElement('video-selection-box').querySelectorAll('.selection-handle.bottom').forEach(el => el.style.display = 'none');
-            }
+            setSelectionHandlesVisible(mode, false, true);
             
             if (mode === 'image') {
                 processImage();
@@ -1983,12 +1972,7 @@ function toggleOriginalRatioLock(mode) {
         }
     } else {
         originalRatioBtn.classList.remove('locked');
-        
-        if (mode === 'image') {
-            getElements('.selection-handle').forEach(el => el.style.display = 'block');
-        } else {
-            getElement('video-selection-box').querySelectorAll('.selection-handle').forEach(el => el.style.display = 'block');
-        }
+        setSelectionHandlesVisible(mode, true);
     }
 }
 
