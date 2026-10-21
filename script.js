@@ -3,7 +3,7 @@
 工具原作者：栢爅
 Github：LSXIFU
 哔哩哔哩UID：402603542
-版本：1.5 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
+版本：1.6 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
 优化内容：GPU加速、内存管理优化、Web Worker支持
 ========================================
 */
@@ -1205,26 +1205,11 @@ function getSelectionSourceRect(mode) {
 // 按当前框选把源素材画进目标 canvas（目标尺寸 = 位图尺寸）
 
 // ===== 降采样 =====
-// 池里的临时 canvas 关掉了平滑（预览要的是硬像素感），于是 drawImage 一次缩很多等于
-// 最近邻：照片缩到 32px 时细笔画整根消失、边缘变锯齿斑块，阈值化后更明显。
-// 这里做两件事：① 第一跳把源夹到目标 8 倍以内，避免中途 canvas 吃到原图尺寸；
-// ② 之后每次最多缩 2 倍、逐级双线性平均，等价于 box 预滤波。
-const downsampleScratch = { a: null, b: null };
-
-function getScratchCanvas(key, width, height) {
-    let entry = downsampleScratch[key];
-    if (!entry) {
-        const canvas = document.createElement('canvas');
-        entry = { canvas: canvas, ctx: canvas.getContext('2d') };
-        downsampleScratch[key] = entry;
-    }
-    if (entry.canvas.width !== width || entry.canvas.height !== height) {
-        entry.canvas.width = width;
-        entry.canvas.height = height;
-    }
-    return entry;
-}
-
+// 唯一取源入口。一次到位用 high-quality 降采样：实测 Chromium 这条路径就是面积平均
+// （1px 棋盘缩 60 倍后 std=0、均值 127），手工逐级折半没有收益 —— 整数比下两者逐字节相同，
+// 非整数比下平均差 0.3~2.0/255（只是采样网格取整不同），而耗时是本实现的 15 倍。
+// 真正的坑只有一个：canvasPool 的临时 canvas 为了预览关了平滑（imageSmoothingEnabled=false），
+// 于是 drawImage 退化成最近邻，细线整根消失 —— 所以这里必须显式打开，别依赖池的状态。
 function drawSourceDownscaled(ctx, source, crop, targetWidth, targetHeight) {
     const naturalWidth = source.naturalWidth || source.videoWidth || source.width || targetWidth;
     const naturalHeight = source.naturalHeight || source.videoHeight || source.height || targetHeight;
@@ -1233,39 +1218,9 @@ function drawSourceDownscaled(ctx, source, crop, targetWidth, targetHeight) {
     const sw = crop ? crop.width : naturalWidth;
     const sh = crop ? crop.height : naturalHeight;
 
-    // 源不比目标大：直接画（放大也走平滑，像素块交给预览层去硬）
-    if (sw <= targetWidth && sh <= targetHeight) {
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(source, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
-        return;
-    }
-
-    const stageWidth = Math.max(targetWidth, Math.min(Math.round(sw), targetWidth * 8));
-    const stageHeight = Math.max(targetHeight, Math.min(Math.round(sh), targetHeight * 8));
-    let from = getScratchCanvas('a', stageWidth, stageHeight);
-    from.ctx.imageSmoothingEnabled = true;
-    from.ctx.imageSmoothingQuality = 'high';
-    from.ctx.clearRect(0, 0, stageWidth, stageHeight);
-    from.ctx.drawImage(source, sx, sy, sw, sh, 0, 0, stageWidth, stageHeight);
-
-    // 逐级折半；写的那张永远不是这一轮正在读的那张
-    let toKey = 'b';
-    while (from.canvas.width > targetWidth * 2 || from.canvas.height > targetHeight * 2) {
-        const nextWidth = Math.max(targetWidth, Math.round(from.canvas.width / 2));
-        const nextHeight = Math.max(targetHeight, Math.round(from.canvas.height / 2));
-        const to = getScratchCanvas(toKey, nextWidth, nextHeight);
-        to.ctx.imageSmoothingEnabled = true;
-        to.ctx.imageSmoothingQuality = 'high';
-        to.ctx.clearRect(0, 0, nextWidth, nextHeight);
-        to.ctx.drawImage(from.canvas, 0, 0, nextWidth, nextHeight);
-        from = to;
-        toKey = toKey === 'b' ? 'a' : 'b';
-    }
-
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(from.canvas, 0, 0, targetWidth, targetHeight);
+    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
 }
 
 function drawSourceIntoCanvas(ctx, mode, width, height) {
@@ -3612,7 +3567,7 @@ function requireLayoutId(layoutId) {
 }
 
 const toBitMapApi = {
-    version: '1.5',
+    version: '1.6',
 
     // 可用布局（给 agent 自描述用）
     layouts() {

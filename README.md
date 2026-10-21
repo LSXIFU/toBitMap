@@ -120,7 +120,7 @@ npx serve .
 - **原作者**：栢爅
 - **GitHub**：[LSXIFU](https://github.com/LSXIFU)
 - **哔哩哔哩UID**：402603542
-- **版本**：1.5
+- **版本**：1.6
 - **制作工具**：Trae IDE AI 工具
 - **首版发布**：2026/3/8
 
