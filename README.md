@@ -54,6 +54,33 @@
 控制台执行 `bitmapSelfTest()`：对 8 种尺寸（含 1×1、37×23、64×9）× 5 种图案 × 4 种布局做
 `encode → decode` 逐字节往返与跨格式等价断言，当前 167 例全过。
 
+## API 与命令行
+
+页面里暴露 `window.toBitMap`（纯计算，不碰 DOM），命令行用同一份核心：
+
+```js
+const api = window.toBitMap;
+api.layouts();                        // 四种布局的自描述元数据
+api.encodeCanvas(canvas, { width: 128, height: 64, layout: 'page_lsb' }); // 取源+降采样+二值化+打包
+api.encode(imageData, { layout: 'row_msb', threshold: 128, dither: 'bayer8' });
+api.decode(bytes, { width: 128, height: 64, layout: 'page_lsb' });        // -> 权威缓冲
+api.encodeCanonical(canonical, { width, height, layout });               // 布局互转，不重新二值化
+api.toCHeader(bytes, { width, height, layout, arrayName: 'logo_bits' });
+api.packRaw(frames, { width, height, layout, fps: 10 });                 // 12 字节头 + 帧
+api.parseRaw(rawBytes, { layout: 'page_lsb' });
+api.selfTest();                                                          // 167 例往返断言
+```
+
+```bash
+node cli.mjs --self-test                       # 在 node 里跑同一套预言机
+node cli.mjs --layouts
+node cli.mjs --in logo.raw --out logo_page.raw --to page_lsb --from row_msb
+node cli.mjs --in logo.raw --c-header logo.h --layout page_lsb --array logo_bits
+```
+
+`cli.mjs` 用 `node:vm` 加载 `script.js`，不复制实现。之所以不抽 ESM：ES module 在 `file://` 下会被 CORS 拦，
+而「双击 index.html 就能用」是这个工具的硬约束。纯计算层不加 DOM 依赖，页面与命令行永远同步。
+
 ## 使用
 
 直接打开 `index.html`。若浏览器限制本地文件，可起个静态服务器：
@@ -71,6 +98,7 @@ npx serve .
 | `index.html` | 页面结构 |
 | `style.css` | 排版与状态样式 |
 | `script.js` | 全部逻辑：位图管线 / 打包 / 导出 |
+| `cli.mjs` | 命令行：vm 加载同一份核心，做 .raw 布局互转 / 出 C 头文件 / 跑自检 |
 | `vendor/jszip.min.js` | 本地化的 JSZip 3.10.1（ZIP 导入导出用，离线不依赖 CDN） |
 
 关键函数：`binarizeImageData()`（阈值 + 抖动）、`packBitmapBytes()`（唯一二值化 → 权威缓冲）、

@@ -3581,6 +3581,177 @@ function runBitmapSelfTest() {
 }
 
 // 控制台里跑一次：window.bitmapSelfTest()
+
+// ===== 对外 API（页面 / node / agent 共用同一份实现）=====
+// 只暴露纯计算入口：不读 DOM、不改 UI 状态，因此能被 cli.mjs 用 vm 直接加载。
+// 加新输出格式时先让这里能调到，再谈 UI。
+const DEFAULT_RGB_THRESHOLDS = {
+    redMin: 0, redMax: 255,
+    greenMin: 0, greenMax: 255,
+    blueMin: 0, blueMax: 255
+};
+
+function requireBitmapSize(width, height) {
+    const w = Number(width);
+    const h = Number(height);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) {
+        throw new Error(`宽高必须是正数，收到 ${width}x${height}`);
+    }
+    if (w > AppConfig.maxBitmapSize || h > AppConfig.maxBitmapSize) {
+        throw new Error(`宽高上限 ${AppConfig.maxBitmapSize}，收到 ${w}x${h}`);
+    }
+    return { width: Math.floor(w), height: Math.floor(h) };
+}
+
+function requireLayoutId(layoutId) {
+    const id = layoutId || DEFAULT_LAYOUT;
+    if (!BITMAP_LAYOUTS[id]) {
+        throw new Error(`未知布局 ${id}；可用：${Object.keys(BITMAP_LAYOUTS).join(', ')}`);
+    }
+    return id;
+}
+
+const toBitMapApi = {
+    version: '1.5',
+
+    // 可用布局（给 agent 自描述用）
+    layouts() {
+        return Object.keys(BITMAP_LAYOUTS).map(function(id) {
+            const layout = BITMAP_LAYOUTS[id];
+            return { id: id, axis: layout.axis, bitOrder: layout.bitOrder, label: layout.label, hint: layout.hint };
+        });
+    },
+
+    // 指定布局的字节数
+    bufferSize(width, height, layoutId) {
+        const size = requireBitmapSize(width, height);
+        return layoutBufferSize(size.width, size.height, requireLayoutId(layoutId));
+    },
+
+    // ImageData -> 二值化后的 ImageData（阈值 / 抖动都在这里，DOM 无关）
+    binarize(imageData, options) {
+        const opts = options || {};
+        if (!imageData || !imageData.width || !imageData.height) {
+            throw new Error('binarize 需要一个 ImageData 对象');
+        }
+        return processBinaryImage(
+            imageData,
+            opts.thresholdType || 'average',
+            opts.threshold === undefined ? 128 : Number(opts.threshold),
+            opts.rgbThresholds || DEFAULT_RGB_THRESHOLDS,
+            !!opts.invert,
+            opts.dither || 'none'
+        );
+    },
+
+    // ImageData -> 位流
+    encode(imageData, options) {
+        const opts = options || {};
+        const layoutId = requireLayoutId(opts.layout);
+        const data = opts.binarize === false ? imageData : this.binarize(imageData, opts);
+        return encodeBitmap(data, layoutId);
+    },
+
+    // 任意可绘制源（canvas / img / video）-> 位流，内部走同一套分步降采样
+    encodeCanvas(source, options) {
+        const opts = options || {};
+        const size = requireBitmapSize(opts.width, opts.height);
+        const canvas = document.createElement('canvas');
+        canvas.width = size.width;
+        canvas.height = size.height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        drawSourceDownscaled(ctx, source, opts.crop || null, size.width, size.height);
+        const imageData = ctx.getImageData(0, 0, size.width, size.height);
+        return this.encode(imageData, opts);
+    },
+
+    // 位流 -> 权威缓冲（行优先 MSB）
+    decode(bytes, options) {
+        const opts = options || {};
+        const size = requireBitmapSize(opts.width, opts.height);
+        const layoutId = requireLayoutId(opts.layout);
+        if (!bytes || typeof bytes.length !== 'number') {
+            throw new Error('decode 需要一个 Uint8Array / 字节数组');
+        }
+        return decodeBitmap(Uint8Array.from(bytes), size.width, size.height, layoutId);
+    },
+
+    // 权威缓冲（行优先 MSB）-> 位流：布局互转用，不重新二值化
+    encodeCanonical(canonical, options) {
+        const opts = options || {};
+        const size = requireBitmapSize(opts.width, opts.height);
+        const layoutId = requireLayoutId(opts.layout);
+        const source = Uint8Array.from(canonical || []);
+        const expected = canonicalBufferSize(size.width, size.height);
+        if (source.length !== expected) {
+            throw new Error(`权威缓冲应为 ${expected} 字节，收到 ${source.length}`);
+        }
+        if (layoutId === DEFAULT_LAYOUT) return source;
+        return transferBits(source, size.width, size.height, layoutId, true);
+    },
+
+    // 位流 -> C 源码
+    toCHeader(bytes, options) {
+        const opts = options || {};
+        const size = requireBitmapSize(opts.width, opts.height);
+        const layoutId = requireLayoutId(opts.layout);
+        return formatCHeader(Uint8Array.from(bytes), {
+            width: size.width,
+            height: size.height,
+            arrayName: opts.arrayName || 'image_bits',
+            widthVar: opts.widthVar || 'WIDTH',
+            heightVar: opts.heightVar || 'HEIGHT',
+            layoutId: layoutId
+        });
+    },
+
+    // 多帧 + 12 字节头 -> .raw
+    packRaw(frames, options) {
+        const opts = options || {};
+        const size = requireBitmapSize(opts.width, opts.height);
+        const layoutId = requireLayoutId(opts.layout);
+        const frameSize = layoutBufferSize(size.width, size.height, layoutId);
+        const list = Array.from(frames || []);
+        if (list.length === 0) throw new Error('packRaw 至少需要一帧');
+        for (const frame of list) {
+            if (frame.length !== frameSize) {
+                throw new Error(`帧长 ${frame.length} 与布局 ${layoutId} 要求的 ${frameSize} 不符`);
+            }
+        }
+        const header = packRawHeader(list.length, Number(opts.fps) || 10, size.width, size.height);
+        const total = header.length + frameSize * list.length;
+        const out = new Uint8Array(total);
+        out.set(header, 0);
+        list.forEach(function(frame, index) {
+            out.set(frame, header.length + index * frameSize);
+        });
+        return out;
+    },
+
+    // .raw -> { width, height, fps, frames, frameSize, layoutHint }
+    parseRaw(buffer, options) {
+        const opts = options || {};
+        const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+        const header = readRawHeader(bytes);
+        if (!header) throw new Error('没有合法的 12 字节 .raw 头（帧数/帧率/宽/高）');
+        const layoutId = requireLayoutId(opts.layout);
+        const frameSize = layoutBufferSize(header.width, header.height, layoutId);
+        return {
+            width: header.width,
+            height: header.height,
+            fps: header.fps,
+            frames: Math.floor((bytes.length - 12) / frameSize),
+            frameSize: frameSize,
+            layout: layoutId,
+            payload: bytes.subarray(12)
+        };
+    },
+
+    selfTest: runBitmapSelfTest
+};
+
+window.toBitMap = toBitMapApi;
+
 window.bitmapSelfTest = runBitmapSelfTest;
 
 window.addEventListener('DOMContentLoaded', init);
