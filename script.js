@@ -1138,6 +1138,27 @@ function processBinaryImage(imageData, thresholdType, threshold, rgbThresholds, 
 }
 
 // 位图尺寸夹紧：输入框允许乱填，落到 canvas 前必须夹住（过大直接 OOM/卡死）
+// 读尺寸时是"夹紧但不回写"，于是输入框可以长期显示 0/-5/5000，而实际按 32/1/1024 输出。
+// 这里在 change（失焦/回车）时把夹紧后的值写回去，超限时**等比**缩小两维 ——
+// 各自 Math.min(1024, v) 会把 200×100 填 5000 变成 1024×1024 的方图。
+function clampSizeInputs(widthId, heightId) {
+    const max = AppConfig.maxBitmapSize;
+    let width = parseInt(getElement(widthId).value, 10);
+    let height = parseInt(getElement(heightId).value, 10);
+    if (!Number.isFinite(width) || width < 1) width = AppConfig.defaultSize;
+    if (!Number.isFinite(height) || height < 1) height = AppConfig.defaultSize;
+
+    if (width > max || height > max) {
+        const factor = max / Math.max(width, height);
+        width = Math.max(1, Math.round(width * factor));
+        height = Math.max(1, Math.round(height * factor));
+    }
+
+    getElement(widthId).value = width;
+    getElement(heightId).value = height;
+    return { width: width, height: height };
+}
+
 function readBitmapSize(elementId) {
     const value = parseInt(getElement(elementId).value);
     if (!isFinite(value) || value < 1) return AppConfig.defaultSize;
@@ -1165,7 +1186,10 @@ function readDitherMode(prefix) {
 function captureSourceImageData(mode, width, height) {
     return canvasPool.withCanvas(width, height, item => {
         if (mode === 'draw') {
-            item.ctx.drawImage(drawCanvas, 0, 0, width, height);
+            // 尺寸不同就先按格索引重采样到目标网格，再直接生成像素
+            ensureDrawGrid(width, height, true);
+            const pixels = buildDrawImageData(item, false);
+            item.ctx.putImageData(pixels, 0, 0);
         } else {
             drawSourceIntoCanvas(item.ctx, mode, width, height);
         }
@@ -1280,8 +1304,13 @@ function drawSourceDownscaled(ctx, source, crop, targetWidth, targetHeight) {
 function drawSourceIntoCanvas(ctx, mode, width, height) {
     const source = mode === 'image' ? currentImage : getElement('video-preview');
     const crop = getSelectionSourceRect(mode);
-    
+
+    // 先铺白底再画源：透明 PNG 的 alpha=0 像素原本保留 (0,0,0,0)，
+    // 而二值化只看 RGB → 透明区被当成纯黑，透明底 logo 导出来是一块黑。
+    // 铺白之后透明 = 背景（白 = 不置位），和用户在预览里看到的一致。
     ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, width, height);
     if (!source) return;
     
     // 降采样统一走分步平均：一次缩太多会被最近邻吃掉细节
@@ -1786,10 +1815,12 @@ function processVideoFrame() {
     }
 }
 
+// 手绘的格子尺寸必须和导出走同一套夹紧：原来这里只 Math.max(1, …)，导出却用
+// readBitmapSize 夹到 1024 —— 填 2000 时预览画 2000 列、导出只有 1024 列。
 function getDrawGridSize() {
     return {
-        width: Math.max(1, parseInt(getElement('draw-width').value) || 16),
-        height: Math.max(1, parseInt(getElement('draw-height').value) || 16)
+        width: readBitmapSize('draw-width'),
+        height: readBitmapSize('draw-height')
     };
 }
 
@@ -1801,45 +1832,83 @@ function getDrawScaleFactor(width, height) {
     return Math.min(AppConfig.maxPreviewZoom, maxCanvasSize / Math.max(width, height));
 }
 
-// 改画布尺寸就把画作清空太粗暴：先把旧画面截下来，按比例铺回新画布
-function renderDrawSurface(preserveContent) {
-    const { width, height } = getDrawGridSize();
-    const scaleFactor = getDrawScaleFactor(width, height);
-    
-    let snapshot = null;
-    if (preserveContent && drawCanvas.width > 0 && drawCanvas.height > 0) {
-        snapshot = document.createElement('canvas');
-        snapshot.width = drawCanvas.width;
-        snapshot.height = drawCanvas.height;
-        snapshot.getContext('2d').drawImage(drawCanvas, 0, 0);
+// ===== 手绘：格子模型是唯一真相 =====
+// 显示画布上叠着网格线（#ddd）。以前把"显示画布"当内容：改尺寸时整体缩放（网格线变像素）、
+// 导出时最近邻降采样（采样点落在网格线上 → 格子被读成白）。实测 16×16 涂满改 37×23 后
+// 出现 171 个洞、导出 75 字节非零。现在内容只存在 drawGridBuf 里，网格线仅用于显示。
+let drawGridBuf = null;   // Uint8Array(width*height)，1 = 黑格
+let drawGridW = 0;
+let drawGridH = 0;
+let drawLastPoint = null; // 上一次 pointer 的格子坐标（用于插值，防快速拖动断成虚线）
+
+function ensureDrawGrid(width, height, preserve) {
+    if (drawGridBuf && drawGridW === width && drawGridH === height) return;
+    const next = new Uint8Array(width * height);
+    if (preserve && drawGridBuf && drawGridW > 0 && drawGridH > 0) {
+        // 按格索引重采样（最近邻）：改尺寸时内容跟着拉伸，但绝不会把网格线当像素
+        for (let y = 0; y < height; y++) {
+            const sy = Math.min(drawGridH - 1, Math.floor(y * drawGridH / height));
+            for (let x = 0; x < width; x++) {
+                const sx = Math.min(drawGridW - 1, Math.floor(x * drawGridW / width));
+                next[y * width + x] = drawGridBuf[sy * drawGridW + sx];
+            }
+        }
     }
-    
-    drawCanvas.width = width * scaleFactor;
-    drawCanvas.height = height * scaleFactor;
-    drawCtx = drawCanvas.getContext('2d', { willReadFrequently: true });
-    
+    drawGridBuf = next;
+    drawGridW = width;
+    drawGridH = height;
+}
+
+// 把模型重画到显示画布：先内容，再网格线（网格线只在显示层，永远不会变成像素）
+function repaintDrawSurface() {
+    if (!drawCtx || drawGridW <= 0 || drawGridH <= 0) return;
+    const scaleX = drawCanvas.width / drawGridW;
+    const scaleY = drawCanvas.height / drawGridH;
+
     drawCtx.fillStyle = 'white';
     drawCtx.fillRect(0, 0, drawCanvas.width, drawCanvas.height);
-    
-    if (snapshot) {
-        drawCtx.imageSmoothingEnabled = false;
-        drawCtx.drawImage(snapshot, 0, 0, drawCanvas.width, drawCanvas.height);
+
+    drawCtx.fillStyle = 'black';
+    for (let y = 0; y < drawGridH; y++) {
+        for (let x = 0; x < drawGridW; x++) {
+            if (drawGridBuf[y * drawGridW + x]) {
+                drawCtx.fillRect(x * scaleX, y * scaleY, Math.ceil(scaleX), Math.ceil(scaleY));
+            }
+        }
     }
-    
-    drawCtx.strokeStyle = '#ddd';
-    for (let i = 0; i <= width; i++) {
-        drawCtx.beginPath();
-        drawCtx.moveTo(i * scaleFactor, 0);
-        drawCtx.lineTo(i * scaleFactor, height * scaleFactor);
-        drawCtx.stroke();
+
+    if (scaleX >= 3 && scaleY >= 3) {
+        drawCtx.strokeStyle = '#ddd';
+        drawCtx.lineWidth = 1;
+        for (let i = 0; i <= drawGridW; i++) {
+            drawCtx.beginPath();
+            drawCtx.moveTo(i * scaleX, 0);
+            drawCtx.lineTo(i * scaleX, drawCanvas.height);
+            drawCtx.stroke();
+        }
+        for (let i = 0; i <= drawGridH; i++) {
+            drawCtx.beginPath();
+            drawCtx.moveTo(0, i * scaleY);
+            drawCtx.lineTo(drawCanvas.width, i * scaleY);
+            drawCtx.stroke();
+        }
     }
-    for (let i = 0; i <= height; i++) {
-        drawCtx.beginPath();
-        drawCtx.moveTo(0, i * scaleFactor);
-        drawCtx.lineTo(width * scaleFactor, i * scaleFactor);
-        drawCtx.stroke();
-    }
-    
+}
+
+function renderDrawSurface(preserveContent) {
+    const { width, height } = getDrawGridSize();
+    // 每格至少 3px：scaleFactor 可能 <1（1024×8 时只有 0.47），那会把画布压成 3px 高，
+    // 一格都点不准，甚至算出 0 尺寸画布让 drawImage 抛 InvalidStateError。
+    const scaleFactor = Math.max(3, getDrawScaleFactor(width, height));
+
+    ensureDrawGrid(width, height, preserveContent);
+
+    drawCanvas.width = Math.max(1, Math.round(width * scaleFactor));
+    drawCanvas.height = Math.max(1, Math.round(height * scaleFactor));
+    drawCtx = drawCanvas.getContext('2d', { willReadFrequently: true });
+    drawCtx.imageSmoothingEnabled = false;
+    repaintDrawSurface();
+
     return { width, height, scaleFactor };
 }
 
@@ -1851,7 +1920,7 @@ function setupDrawCanvas() {
     drawCanvas.addEventListener('pointerup', stopDrawing);
     drawCanvas.addEventListener('pointercancel', stopDrawing);
     drawCanvas.addEventListener('pointerleave', stopDrawing);
-    
+
     renderDrawSurface(false);
 }
 
@@ -1860,104 +1929,127 @@ function resizeDrawCanvas() {
     processDrawCanvas();
 }
 
+// 画一格：同时更新模型与显示（只重画这一格，不整层重绘，拖动画大画布才不卡）
+function paintDrawCell(x, y, isBlack) {
+    if (x < 0 || y < 0 || x >= drawGridW || y >= drawGridH) return;
+    const index = y * drawGridW + x;
+    const value = isBlack ? 1 : 0;
+    if (drawGridBuf[index] === value) return;
+    drawGridBuf[index] = value;
+
+    const scaleX = drawCanvas.width / drawGridW;
+    const scaleY = drawCanvas.height / drawGridH;
+    drawCtx.fillStyle = isBlack ? 'black' : 'white';
+    // 多盖 1px：把压在格子边界上的网格线一并覆盖掉
+    drawCtx.fillRect(x * scaleX, y * scaleY, Math.ceil(scaleX) + (scaleX >= 3 ? 1 : 0), Math.ceil(scaleY) + (scaleY >= 3 ? 1 : 0));
+}
+
 function startDrawing(e) {
     isDrawing = true;
+    drawLastPoint = null;
     draw(e);
 }
 
 function draw(e) {
-    if (!isDrawing) return;
-    
+    if (!isDrawing || !drawGridBuf) return;
+
     const rect = drawCanvas.getBoundingClientRect();
-    // 画布被 CSS 缩放时用显示尺寸换算，否则笔触与网格错位
-    const displayScale = rect.width ? drawCanvas.width / rect.width : 1;
-    const mouseX = (e.clientX - rect.left) * displayScale;
-    const mouseY = (e.clientY - rect.top) * displayScale;
-    
-    const { width, height } = getDrawGridSize();
-    const scaleFactor = getDrawScaleFactor(width, height);
-    
-    const brushRadius = brushSize * (scaleFactor / 2);
-    
-    const startX = Math.max(0, Math.floor((mouseX - brushRadius) / scaleFactor));
-    const endX = Math.min(width - 1, Math.floor((mouseX + brushRadius) / scaleFactor));
-    const startY = Math.max(0, Math.floor((mouseY - brushRadius) / scaleFactor));
-    const endY = Math.min(height - 1, Math.floor((mouseY + brushRadius) / scaleFactor));
-    
-    // 网格很密时 scaleFactor 可能小于 2，原来的 scaleFactor-2 会让格子画不出来
-    const inset = scaleFactor >= 4 ? 1 : 0;
-    const cellSize = Math.max(1, scaleFactor - inset * 2);
-    
-    for (let x = startX; x <= endX; x++) {
-        for (let y = startY; y <= endY; y++) {
-            const cellCenterX = x * scaleFactor + (scaleFactor / 2);
-            const cellCenterY = y * scaleFactor + (scaleFactor / 2);
-            
-            const distance = Math.sqrt(
-                Math.pow(mouseX - cellCenterX, 2) + 
-                Math.pow(mouseY - cellCenterY, 2)
-            );
-            
-            if (distance <= brushRadius) {
-                drawCtx.fillStyle = drawMode ? 'black' : 'white';
-                drawCtx.fillRect(x * scaleFactor + inset, y * scaleFactor + inset, cellSize, cellSize);
+    if (!rect.width || !rect.height) return;
+
+    // 一律换算到「格子坐标」，不再用 CSS 像素做命中判定
+    const cellX = (e.clientX - rect.left) / rect.width * drawGridW;
+    const cellY = (e.clientY - rect.top) / rect.height * drawGridH;
+    const isBlack = !!drawMode;
+
+    // 笔触 1 → 只画光标所在格（原来用内切圆判定，格子四角永远点不中）；
+    // 其他笔触仍是圆盘：1/3/5 分别覆盖 1/9/21 格，和旧手感一致。
+    const radius = brushSize <= 1 ? 0 : brushSize / 2;
+
+    // 两次 pointermove 之间可能跨很多格，必须插值，否则快速拖动会断成虚线
+    const from = drawLastPoint || { x: cellX, y: cellY };
+    const distance = Math.hypot(cellX - from.x, cellY - from.y);
+    const steps = Math.max(1, Math.ceil(distance * 2));
+    for (let step = 0; step <= steps; step++) {
+        const t = step / steps;
+        const px = from.x + (cellX - from.x) * t;
+        const py = from.y + (cellY - from.y) * t;
+        if (radius <= 0) {
+            paintDrawCell(Math.floor(px), Math.floor(py), isBlack);
+            continue;
+        }
+        for (let y = Math.floor(py - radius); y <= Math.floor(py + radius); y++) {
+            for (let x = Math.floor(px - radius); x <= Math.floor(px + radius); x++) {
+                const dx = (x + 0.5) - px;
+                const dy = (y + 0.5) - py;
+                if (Math.hypot(dx, dy) <= radius + 0.01) paintDrawCell(x, y, isBlack);
             }
         }
     }
-    
+
+    drawLastPoint = { x: cellX, y: cellY };
     processDrawCanvas();
 }
 
 function stopDrawing() {
     isDrawing = false;
+    drawLastPoint = null;
 }
 
 function clearCanvas() {
-    renderDrawSurface(false);
+    if (drawGridBuf) drawGridBuf.fill(0);
+    repaintDrawSurface();
     processDrawCanvas();
 }
 
+// 从模型直接生成位图（不经过任何画布缩放，网格线无从混进来）
+function buildDrawImageData(target, invert) {
+    const pixels = target.ctx.createImageData(drawGridW, drawGridH);
+    const data = pixels.data;
+    for (let i = 0; i < drawGridW * drawGridH; i++) {
+        const value = drawGridBuf[i] ? 0 : 255;
+        const v = invert ? 255 - value : value;
+        const o = i * 4;
+        data[o] = v;
+        data[o + 1] = v;
+        data[o + 2] = v;
+        data[o + 3] = 255;
+    }
+    return pixels;
+}
+
 function processDrawCanvas() {
-    const width = parseInt(getElement('draw-width').value);
-    const height = parseInt(getElement('draw-height').value);
+    const { width, height } = getDrawGridSize();
+    ensureDrawGrid(width, height, false);
     const invert = getElement('draw-invert-checkbox').checked;
-    
-    const maxCanvasSize = Math.min(
+    const scaleFactor = Math.max(1, Math.min(AppConfig.maxPreviewZoom, Math.min(
         window.innerWidth * 0.8,
         window.innerHeight * 0.6
-    );
-    
-    const scaleFactor = Math.min(AppConfig.maxPreviewZoom, maxCanvasSize / Math.max(width, height));
-    
+    ) / Math.max(width, height)));
+
     const imageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
         const tempCtx = tempCanvasItem.ctx;
-        tempCtx.drawImage(drawCanvas, 0, 0, width, height);
-        
-        const pixels = tempCtx.getImageData(0, 0, width, height);
-        
-        if (invert) {
-            const data = pixels.data;
-            for (let i = 0; i < data.length; i += 4) {
-                data[i] = 255 - data[i];
-                data[i + 1] = 255 - data[i + 1];
-                data[i + 2] = 255 - data[i + 2];
-            }
-        }
-        
+        const pixels = buildDrawImageData(tempCanvasItem, invert);
+        tempCtx.putImageData(pixels, 0, 0);
+
         const previewCanvas = getElement('draw-preview');
         const previewCtx = previewCanvas.getContext('2d');
-        previewCanvas.width = width * scaleFactor;
-        previewCanvas.height = height * scaleFactor;
-        
-        tempCtx.putImageData(pixels, 0, 0);
-        
+        previewCanvas.width = Math.max(1, Math.round(width * scaleFactor));
+        previewCanvas.height = Math.max(1, Math.round(height * scaleFactor));
         previewCtx.imageSmoothingEnabled = false;
-        previewCtx.drawImage(tempCanvasItem.canvas, 0, 0, width * scaleFactor, height * scaleFactor);
-        
+        previewCtx.drawImage(tempCanvasItem.canvas, 0, 0, previewCanvas.width, previewCanvas.height);
+
         return pixels;
     });
 
     scheduleCodeGeneration(imageData, width, height, 'draw');
+}
+
+// 原图信息行只有单图导入时才会写，批量翻页时不动 —— 于是显示的是别人的分辨率或干脆空白
+function updateImageInfo(size) {
+    const info = getElement('image-info');
+    if (!info || !size || !size.width) return;
+    const ratio = (size.width / size.height).toFixed(2);
+    info.innerHTML = `原图信息: ${size.width}x${size.height} (${ratio}:1), 24位彩色`;
 }
 
 function showBatchImage(index) {
@@ -1979,6 +2071,7 @@ function showBatchImage(index) {
     }
     
     applyImageSettings(imageSettings[index] || createDefaultImageSettings());
+    updateImageInfo(modeStates.image.originalSize);
     getElement('image-counter').textContent = `${currentBatchIndex + 1} / ${batchImages.length}`;
     
     processImage();
@@ -2804,8 +2897,20 @@ function processTextTab() {
     const empty = getElement('text-empty');
 
     if (!rendered) {
+        // 清空文本要连带清掉三处残留：否则右边还挂着上一张字模、代码框还是旧的 C 数组，
+        // 点"复制源码"复制到的是上一版数据
         if (empty) empty.style.display = 'inline';
         getElement('text-size-label').textContent = '';
+        for (const id of ['text-source-preview', 'text-preview']) {
+            const canvas = getElement(id);
+            if (canvas) { canvas.width = 0; canvas.height = 0; }
+        }
+        modeStates.text.resultCode = '';
+        lastRender = null;
+        if (activeMode === 'text') {
+            getElement('result-code').textContent = '';
+            getElement('result-stats').textContent = '';
+        }
         return;
     }
     if (empty) empty.style.display = 'none';
@@ -2910,14 +3015,27 @@ function setupEventListeners() {
     getElement('refresh-btn').addEventListener('click', refreshResult);
     
     getElement('cancel-export-btn').addEventListener('click', function() {
+        // 只置取消标志，不要在收尾前解禁按钮/隐藏进度条：
+        // 旧实现在这里立刻解禁，用户 17~104ms 内再点导出就会把 cancelVideoExport
+        // 重置成 false，被终止的那次导出继续跑完并再下载一份。
+        // 按钮与进度条交给各自导出的 finally（endFrameExport）恢复。
         cancelVideoExport = true;
         cancelRawExport = true;
-        getElement('cancel-export-btn').style.display = 'none';
-        getElement('export-progress').style.display = 'none';
-        getElement('export-btn').disabled = false;
-        getElement('export-raw-btn').disabled = false;
+        getElement('cancel-export-btn').disabled = true;
     });
     
+    // 尺寸在输入过程中不回写（会把正在输入的 "0" 立刻改成 "1"），失焦/回车时统一夹紧
+    for (const pair of [['width-input', 'height-input', processImage],
+                        ['video-width', 'video-height', processVideoFrame],
+                        ['draw-width', 'draw-height', () => { resizeDrawCanvas(); }]]) {
+        for (const id of [pair[0], pair[1]]) {
+            getElement(id).addEventListener('change', () => {
+                clampSizeInputs(pair[0], pair[1]);
+                pair[2]();
+            });
+        }
+    }
+
     getElement('prev-image-btn').addEventListener('click', showPrevImage);
     getElement('next-image-btn').addEventListener('click', showNextImage);
     
@@ -3066,15 +3184,21 @@ function updateExportProgress(done, total) {
     getElement('progress-text').textContent = `${done}/${total} 帧`;
 }
 
+// 导出期间两个导出按钮必须成对禁用：只禁自己那一个时，用户可以点另一个，
+// 两个抓帧循环共用同一个 <video> 和同一块临时 canvas（releaseAll 会抢走对方的），
+// 结果两份文件都"导出完成"但帧内容是错的（实测 600 帧里 574 帧错位）。
 function beginFrameExport(buttonId) {
-    getElement(buttonId).disabled = true;
+    getElement('export-btn').disabled = true;
+    getElement('export-raw-btn').disabled = true;
+    getElement('cancel-export-btn').disabled = false;
     getElement('cancel-export-btn').style.display = 'inline-flex';
     getElement('export-progress').style.display = 'block';
     updateExportProgress(0, 1);
 }
 
 function endFrameExport(buttonId) {
-    getElement(buttonId).disabled = false;
+    getElement('export-btn').disabled = false;
+    getElement('export-raw-btn').disabled = false;
     getElement('cancel-export-btn').style.display = 'none';
     getElement('export-progress').style.display = 'none';
 }
@@ -3260,6 +3384,12 @@ async function exportVideo() {
         return;
     }
 
+    // 单一导出锁：两个导出共用同一个视频元素与 canvas 池，并发必然互相踩
+    if (isExportingFrames()) {
+        alert('已有导出在进行，请等它完成或先终止');
+        return;
+    }
+
     const video = getElement('video-preview');
     const width = readBitmapSize('video-width');
     const height = readBitmapSize('video-height');
@@ -3278,6 +3408,13 @@ async function exportVideo() {
 
     isVideoExporting = true;
     cancelVideoExport = false;
+    // 名字在开始时快照：onFrame 里逐帧读 DOM 的话，导出途中切 tab
+    // （setupTabs 会重写这三个输入框）会让同一批 .h 混进别的模式的数组名
+    const headerNames = {
+        arrayName: getElement('array-name').value || 'image_bits',
+        widthVar: getElement('width-var').value || 'WIDTH',
+        heightVar: getElement('height-var').value || 'HEIGHT'
+    };
     beginFrameExport('export-btn');
 
     const fileName = getElement('file-name').value || modeStates.video.fileName;
@@ -3358,9 +3495,9 @@ async function exportVideo() {
                         layoutId: layoutId,
                         width: width,
                         height: height,
-                        arrayName: getElement('array-name').value || 'image_bits',
-                        widthVar: getElement('width-var').value || 'WIDTH',
-                        heightVar: getElement('height-var').value || 'HEIGHT'
+                        arrayName: headerNames.arrayName,
+                        widthVar: headerNames.widthVar,
+                        heightVar: headerNames.heightVar
                     });
                     currentZipFrames.push({ frame: frameNumber, code: code });
                     frameNumber++;
@@ -3480,7 +3617,7 @@ function exportRawImage() {
     a.click();
     URL.revokeObjectURL(url);
     
-    alert(`Raw文件导出完成\n文件名：\n- 分辨率：${width}x${height}\n- 帧数：${totalFrames}\n- 帧率：${fps}fps\n- 输出格式：${getLayout(layoutId).label}`);
+    alert(`Raw文件导出完成\n文件名：${filename}\n- 分辨率：${width}x${height}\n- 帧数：${totalFrames}\n- 帧率：${fps}fps\n- 输出格式：${getLayout(layoutId).label}`);
 }
 
 async function exportRawVideo() {
@@ -3501,6 +3638,12 @@ async function exportRawVideo() {
 
     if (!isFinite(video.duration) || video.duration <= 0) {
         alert('视频时长无效，请等视频加载完成后再导出');
+        return;
+    }
+
+    // 同上：Raw 与 C 代码导出互斥
+    if (isExportingFrames()) {
+        alert('已有导出在进行，请等它完成或先终止');
         return;
     }
 
@@ -3944,17 +4087,25 @@ function runBitmapSelfTest() {
     // C 源码结构：数组体里每一行都必须以逗号结尾。
     // 少了这个断言，'每行缺逗号' 这种能让所有导出头编译不过的 bug 会一路绿灯
     // （实测：MSVC error C2059，而自检当时全过）。
-    const headerText = formatCHeader(encodeBitmap(makeTestCanonical(37, 23, 3), 'row_msb'), {
+    const headerCanonical = makeTestCanonical(37, 23, 'checker3');
+    const headerText = formatCHeader(transferBits(headerCanonical, 37, 23, 'row_msb', true), {
         width: 37, height: 23, layoutId: 'row_msb'
     });
     const bodyLines = headerText.split('\n').slice(headerText.split('\n').findIndex(l => l.endsWith('{')) + 1);
     const elementLines = bodyLines.slice(0, bodyLines.length - 1);   // 去掉最后的 '};'
-    record('C 源码：数组体每行以逗号结尾',
-           elementLines.length > 0 && elementLines.every(line => /,\s*$/.test(line)),
-           { lines: elementLines.length, firstBad: elementLines.find(line => !/,\s*$/.test(line)) });
-    record('C 源码：元素数 = 字节数',
-           (headerText.match(/0x[0-9a-f]{2}/g) || []).length === Math.ceil(37 / 8) * 23,
-           { got: (headerText.match(/0x[0-9a-f]{2}/g) || []).length, want: Math.ceil(37 / 8) * 23 });
+    cases++;
+    if (!(elementLines.length > 0 && elementLines.every(line => /,\s*$/.test(line)))) {
+        failures.push('C 源码：数组体每行未以逗号结尾 :: ' + JSON.stringify({
+            lines: elementLines.length,
+            firstBad: elementLines.find(line => !/,\s*$/.test(line))
+        }));
+    }
+    cases++;
+    const headerBytes = (headerText.match(/0x[0-9a-f]{2}/g) || []).length;
+    const expectedBytes = Math.ceil(37 / 8) * 23;
+    if (headerBytes !== expectedBytes) {
+        failures.push(`C 源码：元素数 ${headerBytes} != ${expectedBytes}`);
+    }
 
     return {
         pass: failures.length === 0,
