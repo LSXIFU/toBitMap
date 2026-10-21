@@ -664,6 +664,33 @@ function packRawHeader(totalFrames, fps, width, height) {
     return new Uint8Array(buffer);
 }
 
+// 逐帧抓取靠 seeked 事件推进。目标时间与当前位置相同（首帧必然是 0）或越界被夹回原值时，
+// 浏览器不会派发 seeked，整条导出链会原地挂死。这里统一包装成「一定回调一次」。
+function seekFrame(video, time, onSeeked) {
+    let settled = false;
+    
+    const handler = () => {
+        if (settled) return;
+        settled = true;
+        video.removeEventListener('seeked', handler);
+        onSeeked();
+    };
+    
+    video.addEventListener('seeked', handler);
+    
+    const before = video.currentTime;
+    video.currentTime = time;
+    
+    if (!video.seeking && Math.abs(video.currentTime - before) < 1e-6) {
+        // 位置没变 → 不会有 seeked，直接抓当前帧
+        queueMicrotask(handler);
+    }
+}
+
+function isExportingFrames() {
+    return isVideoExporting || isRawExporting;
+}
+
 function init() {
     canvasPool = new CanvasPool(AppConfig.canvasPoolSize);
     glProcessor = new WebGLImageProcessor();
@@ -2327,14 +2354,19 @@ function setupEventListeners() {
         getElement('brush-size-value').textContent = brushSize;
     });
     
-    getElement('video-preview').addEventListener('timeupdate', processVideoFrame);
+    getElement('video-preview').addEventListener('timeupdate', function() {
+        if (isExportingFrames()) return;
+        processVideoFrame();
+    });
     
     getElement('video-preview').addEventListener('seeked', function() {
+        if (isExportingFrames()) return;
         lastFrameTime = 0;
         processVideoFrame();
     });
     
     getElement('video-preview').addEventListener('play', function() {
+        if (isExportingFrames()) return;
         lastFrameTime = 0;
         processVideoFrame();
     });
@@ -2415,9 +2447,17 @@ function exportVideo() {
     const thresholdType = getElement('video-threshold-type').value;
     const invert = getElement('video-invert-checkbox').checked;
     const removeDuplicates = getElement('remove-duplicates').checked;
-    const framesPerZip = parseInt(getElement('frames-per-zip').value);
+    const framesPerZip = Math.max(1, parseInt(getElement('frames-per-zip').value) || 300);
     
-    const totalFrames = Math.ceil(video.duration * frameRate);
+    if (!isFinite(video.duration) || video.duration <= 0) {
+        alert('视频时长无效，请等视频加载完成后再导出');
+        return;
+    }
+    
+    // 导出期间暂停播放：timeupdate/seeked 的预览处理会与逐帧抓取抢同一块临时 canvas
+    video.pause();
+    
+    const totalFrames = Math.max(1, Math.ceil(video.duration * frameRate));
     let processedFrames = 0;
     let currentFrame = 0;
     let frameNumber = 1;
@@ -2450,10 +2490,8 @@ function exportVideo() {
         }
         
         const currentTime = currentFrame / frameRate;
-        video.currentTime = currentTime;
         
-        video.addEventListener('seeked', function onSeeked() {
-            video.removeEventListener('seeked', onSeeked);
+        seekFrame(video, currentTime, function() {
             
             const tempCtx = tempCanvasItem.ctx;
             drawSourceIntoCanvas(tempCtx, 'video', width, height);
@@ -2713,7 +2751,14 @@ function exportRawVideo() {
     const invert = getElement('video-invert-checkbox').checked;
     const removeDuplicates = getElement('remove-duplicates').checked;
     
-    const totalFrames = Math.ceil(video.duration * frameRate);
+    if (!isFinite(video.duration) || video.duration <= 0) {
+        alert('视频时长无效，请等视频加载完成后再导出');
+        return;
+    }
+    
+    video.pause();
+    
+    const totalFrames = Math.max(1, Math.ceil(video.duration * frameRate));
     let processedFrames = 0;
     let currentFrame = 0;
     let allFrameData = [];
@@ -2739,10 +2784,8 @@ function exportRawVideo() {
         }
         
         const currentTime = currentFrame / frameRate;
-        video.currentTime = currentTime;
         
-        video.addEventListener('seeked', function onSeeked() {
-            video.removeEventListener('seeked', onSeeked);
+        seekFrame(video, currentTime, function() {
             
             const tempCtx = tempCanvasItem.ctx;
             drawSourceIntoCanvas(tempCtx, 'video', width, height);
