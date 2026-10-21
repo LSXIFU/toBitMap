@@ -76,6 +76,15 @@ let videoAspectRatioObj = null;
 let isRawExporting = false;
 let cancelRawExport = false;
 
+// 阈值类型 → 着色器分支索引。UI 传 'brightness'，历史代码里写作 'luminance'，两者同义。
+// 未知类型一律回落到亮度分支，与 CPU 路径（_cpuBinary 的 else）保持一致。
+const THRESHOLD_TYPE_INDEX = { rgb: 0, brightness: 1, luminance: 1, individual: 2 };
+
+function thresholdTypeToIndex(thresholdType) {
+    const index = THRESHOLD_TYPE_INDEX[thresholdType];
+    return index === undefined ? 1 : index;
+}
+
 class CanvasPool {
     constructor(size = 4) {
         this.pool = [];
@@ -274,8 +283,7 @@ class WebGLImageProcessor {
         
         gl.uniform1i(gl.getUniformLocation(program, 'u_image'), 0);
         gl.uniform1f(gl.getUniformLocation(program, 'u_threshold'), threshold / 255);
-        gl.uniform1i(gl.getUniformLocation(program, 'u_thresholdType'), 
-            thresholdType === 'rgb' ? 0 : (thresholdType === 'luminance' ? 1 : 2));
+        gl.uniform1i(gl.getUniformLocation(program, 'u_thresholdType'), thresholdTypeToIndex(thresholdType));
         gl.uniform1f(gl.getUniformLocation(program, 'u_redMin'), parseInt(rgbThresholds.redMin) / 255);
         gl.uniform1f(gl.getUniformLocation(program, 'u_redMax'), parseInt(rgbThresholds.redMax) / 255);
         gl.uniform1f(gl.getUniformLocation(program, 'u_greenMin'), parseInt(rgbThresholds.greenMin) / 255);
