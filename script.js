@@ -78,6 +78,9 @@ let cancelRawExport = false;
 // 未知类型一律回落到亮度分支，与 CPU 路径（_cpuBinary 的 else）保持一致。
 const THRESHOLD_TYPE_INDEX = { rgb: 0, brightness: 1, luminance: 1, individual: 2 };
 
+// 批量导入时认定哪些压缩包条目是图片
+const IMAGE_EXTENSION = /\.(jpe?g|png|gif|bmp|webp)$/i;
+
 function thresholdTypeToIndex(thresholdType) {
     const index = THRESHOLD_TYPE_INDEX[thresholdType];
     return index === undefined ? 1 : index;
@@ -1068,9 +1071,15 @@ function generateCode(imageData, width, height) {
 }
 
 function handleImageUpload(e) {
-    const file = e.target.files[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
     
+    if (files.length > 1) {
+        loadBatchFromFiles(files);
+        return;
+    }
+    
+    const file = files[0];
     modeStates.image.fileName = file.name.split('.').slice(0, -1).join('.');
     
     const reader = new FileReader();
@@ -1108,65 +1117,181 @@ function handleZipUpload(e) {
     if (!file) return;
     
     const fileName = file.name.toLowerCase();
-    const supportedFormats = ['.zip'];
     
-    const fileExtension = fileName.substring(fileName.lastIndexOf('.'));
-    
-    if (!supportedFormats.includes(fileExtension)) {
+    if (!fileName.endsWith('.zip')) {
         alert('当前版本仅支持ZIP格式的压缩包。');
         return;
     }
     
-    const zip = new JSZip();
-    zip.loadAsync(file).then(function(zip) {
-        batchImages = [];
-        imageSettings = [];
-        currentBatchIndex = 0;
-        
-        zip.forEach(function(relativePath, zipEntry) {
-            if (zipEntry.name.match(/\.(jpg|jpeg|png|gif|bmp)$/i)) {
-                zipEntry.async('blob').then(function(blob) {
-                    const reader = new FileReader();
-                    reader.onload = function(e) {
-                        const img = new Image();
-                        img.onload = function() {
-                            batchImages.push({
-                                image: img,
-                                name: zipEntry.name.split('.').slice(0, -1).join('.'),
-                                blob: blob
-                            });
-                            
-                            imageSettings.push({
-                                width: 32,
-                                height: 32,
-                                threshold: 128,
-                                thresholdType: 'rgb',
-                                redMin: 0,
-                                redMax: 255,
-                                greenMin: 0,
-                                greenMax: 255,
-                                blueMin: 0,
-                                blueMax: 255,
-                                invert: false,
-                                selection: null
-                            });
-                            
-                            if (batchImages.length === 1) {
-                                showBatchImage(0);
-                                getElement('batch-controls').style.display = 'block';
-                            }
-                            
-                            getElement('image-counter').textContent = `${currentBatchIndex + 1} / ${batchImages.length}`;
-                        };
-                        img.src = e.target.result;
-                    };
-                    reader.readAsDataURL(blob);
-                });
-            }
-        });
-    }).catch(function(error) {
-        alert('处理压缩包失败: ' + error.message);
+    loadBatchFromZip(file);
+}
+
+async function loadBatchFromZip(file) {
+    let zip;
+    try {
+        zip = await JSZip.loadAsync(file);
+    } catch (error) {
+        alert('处理压缩包失败: ' + (error && error.message ? error.message : error));
+        return;
+    }
+    
+    const entries = [];
+    zip.forEach(function(relativePath, zipEntry) {
+        if (!zipEntry.dir && IMAGE_EXTENSION.test(zipEntry.name)) {
+            entries.push(zipEntry);
+        }
     });
+    
+    // 稳定排序：zipEntry.async + FileReader 是两层异步，直接 push 会让顺序随机
+    entries.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+    
+    if (entries.length === 0) {
+        alert('压缩包内没有找到可用的图片文件');
+        return;
+    }
+    
+    await loadBatchItems(entries.map(zipEntry => ({
+        name: zipEntry.name.split('.').slice(0, -1).join('.'),
+        getBlob: () => zipEntry.async('blob')
+    })));
+}
+
+function stripExtension(name) {
+    return name.split('.').slice(0, -1).join('.');
+}
+
+// 多个文件直接拖入/选中时也走批量（input 上本来就有 multiple，之前只取了第一个）
+async function loadBatchFromFiles(files) {
+    const imageFiles = files
+        .filter(file => /^image\//.test(file.type) || IMAGE_EXTENSION.test(file.name))
+        .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+    
+    if (imageFiles.length === 0) {
+        alert('没有可用的图片文件');
+        return;
+    }
+    
+    await loadBatchItems(imageFiles.map(file => ({
+        name: stripExtension(file.name),
+        getBlob: () => Promise.resolve(file)
+    })));
+}
+
+// 逐张串行加载：保序、失败跳过、期间刷新计数
+async function loadBatchItems(items) {
+    batchImages = [];
+    imageSettings = [];
+    currentBatchIndex = 0;
+    
+    for (let i = 0; i < items.length; i++) {
+        try {
+            const blob = await items[i].getBlob();
+            const image = await loadImageFromBlob(blob);
+            batchImages.push({ image: image, name: items[i].name, blob: blob });
+            imageSettings.push(createDefaultImageSettings());
+        } catch (error) {
+            console.warn('跳过无法解码的图片:', items[i].name, error);
+        }
+        getElement('image-counter').textContent = `加载中 ${i + 1} / ${items.length}`;
+    }
+    
+    if (batchImages.length === 0) {
+        alert('没有图片能成功解码');
+        return;
+    }
+    
+    getElement('batch-controls').style.display = 'block';
+    showBatchImage(0);
+}
+
+function loadImageFromBlob(blob) {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+            URL.revokeObjectURL(url);
+            resolve(img);
+        };
+        img.onerror = () => {
+            URL.revokeObjectURL(url);
+            reject(new Error('图片解码失败'));
+        };
+        img.src = url;
+    });
+}
+
+function createDefaultImageSettings() {
+    return {
+        width: AppConfig.defaultSize,
+        height: AppConfig.defaultSize,
+        threshold: 128,
+        thresholdType: 'rgb',
+        redMin: 0,
+        redMax: 255,
+        greenMin: 0,
+        greenMax: 255,
+        blueMin: 0,
+        blueMax: 255,
+        invert: false
+    };
+}
+
+function readImageSettingsFromUI() {
+    return {
+        width: parseInt(getElement('width-input').value) || AppConfig.defaultSize,
+        height: parseInt(getElement('height-input').value) || AppConfig.defaultSize,
+        threshold: parseInt(getElement('threshold-input').value),
+        thresholdType: getElement('threshold-type').value,
+        redMin: parseInt(getElement('red-min').value),
+        redMax: parseInt(getElement('red-max').value),
+        greenMin: parseInt(getElement('green-min').value),
+        greenMax: parseInt(getElement('green-max').value),
+        blueMin: parseInt(getElement('blue-min').value),
+        blueMax: parseInt(getElement('blue-max').value),
+        invert: getElement('invert-checkbox').checked
+    };
+}
+
+function applyImageSettings(settings) {
+    getElement('width-input').value = settings.width;
+    getElement('height-input').value = settings.height;
+    getElement('threshold-input').value = settings.threshold;
+    getElement('threshold-value').textContent = settings.threshold;
+    
+    getElements('.threshold-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if (btn.dataset.type === settings.thresholdType) {
+            btn.classList.add('active');
+        }
+    });
+    getElement('threshold-type').value = settings.thresholdType;
+    
+    const rgbThresholds = getElement('rgb-thresholds');
+    const singleThreshold = getElement('single-threshold');
+    
+    if (settings.thresholdType === 'individual') {
+        rgbThresholds.style.display = 'block';
+        singleThreshold.style.display = 'none';
+    } else {
+        rgbThresholds.style.display = 'none';
+        singleThreshold.style.display = 'block';
+    }
+    
+    getElement('red-min').value = settings.redMin;
+    getElement('red-max').value = settings.redMax;
+    getElement('green-min').value = settings.greenMin;
+    getElement('green-max').value = settings.greenMax;
+    getElement('blue-min').value = settings.blueMin;
+    getElement('blue-max').value = settings.blueMax;
+    
+    getElement('red-min-value').textContent = settings.redMin;
+    getElement('red-max-value').textContent = settings.redMax;
+    getElement('green-min-value').textContent = settings.greenMin;
+    getElement('green-max-value').textContent = settings.greenMax;
+    getElement('blue-min-value').textContent = settings.blueMin;
+    getElement('blue-max-value').textContent = settings.blueMax;
+    
+    getElement('invert-checkbox').checked = settings.invert;
 }
 
 function handleVideoUpload(e) {
@@ -1505,52 +1630,23 @@ function processDrawCanvas() {
 function showBatchImage(index) {
     if (index < 0 || index >= batchImages.length) return;
     
+    // 先把当前这张的调整结果存回去，翻回来时才不会丢
+    if (batchImages.length > 0 && imageSettings[currentBatchIndex]) {
+        imageSettings[currentBatchIndex] = readImageSettingsFromUI();
+    }
+    
     currentBatchIndex = index;
     const batchImage = batchImages[index];
     currentImage = batchImage.image;
     modeStates.image.fileName = batchImage.name;
     modeStates.image.originalSize = { width: batchImage.image.width, height: batchImage.image.height };
     
-    const settings = imageSettings[index];
-    getElement('width-input').value = settings.width;
-    getElement('height-input').value = settings.height;
-    getElement('threshold-input').value = settings.threshold;
-    getElement('threshold-value').textContent = settings.threshold;
-    
-    getElements('.threshold-btn').forEach(btn => {
-        btn.classList.remove('active');
-        if (btn.dataset.type === settings.thresholdType) {
-            btn.classList.add('active');
-        }
-    });
-    getElement('threshold-type').value = settings.thresholdType;
-    
-    const rgbThresholds = getElement('rgb-thresholds');
-    const singleThreshold = getElement('single-threshold');
-    
-    if (settings.thresholdType === 'individual') {
-        rgbThresholds.style.display = 'block';
-        singleThreshold.style.display = 'none';
-    } else {
-        rgbThresholds.style.display = 'none';
-        singleThreshold.style.display = 'block';
+    if (imageAspectRatioObj) {
+        imageAspectRatioObj.aspectRatio = batchImage.image.width / batchImage.image.height;
     }
     
-    getElement('red-min').value = settings.redMin;
-    getElement('red-max').value = settings.redMax;
-    getElement('green-min').value = settings.greenMin;
-    getElement('green-max').value = settings.greenMax;
-    getElement('blue-min').value = settings.blueMin;
-    getElement('blue-max').value = settings.blueMax;
-    
-    getElement('red-min-value').textContent = settings.redMin;
-    getElement('red-max-value').textContent = settings.redMax;
-    getElement('green-min-value').textContent = settings.greenMin;
-    getElement('green-max-value').textContent = settings.greenMax;
-    getElement('blue-min-value').textContent = settings.blueMin;
-    getElement('blue-max-value').textContent = settings.blueMax;
-    
-    getElement('invert-checkbox').checked = settings.invert;
+    applyImageSettings(imageSettings[index] || createDefaultImageSettings());
+    getElement('image-counter').textContent = `${currentBatchIndex + 1} / ${batchImages.length}`;
     
     processImage();
 }
@@ -2255,14 +2351,12 @@ function setupEventListeners() {
 function showPrevImage() {
     if (currentBatchIndex > 0) {
         showBatchImage(currentBatchIndex - 1);
-        getElement('image-counter').textContent = `${currentBatchIndex + 1} / ${batchImages.length}`;
     }
 }
 
 function showNextImage() {
     if (currentBatchIndex < batchImages.length - 1) {
         showBatchImage(currentBatchIndex + 1);
-        getElement('image-counter').textContent = `${currentBatchIndex + 1} / ${batchImages.length}`;
     }
 }
 
