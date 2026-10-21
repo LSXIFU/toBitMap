@@ -3,7 +3,7 @@
 工具原作者：栢爅
 Github：LSXIFU
 哔哩哔哩UID：402603542
-版本：1.6 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
+版本：1.7 | 使用Trae IDE AI工具制作 | 2026/3/8 | 免费自用、不允许商用 | 使用请注明原作者
 ========================================
 -->
 <!DOCTYPE html>
@@ -25,7 +25,7 @@ Github：LSXIFU
             <div class="header-meta">
                 <span class="badge">离线可用</span>
                 <span class="badge">PROGMEM</span>
-                <span class="badge badge-version">v1.6</span>
+                <span class="badge badge-version">v1.7</span>
             </div>
         </header>
 
@@ -33,6 +33,7 @@ Github：LSXIFU
             <button class="tab-btn active" data-tab="image" role="tab">图片转换</button>
             <button class="tab-btn" data-tab="video" role="tab">视频转换</button>
             <button class="tab-btn" data-tab="draw" role="tab">手绘模式</button>
+            <button class="tab-btn" data-tab="text" role="tab">艺术字</button>
         </nav>
 
         <main>
@@ -441,6 +442,81 @@ Github：LSXIFU
                     </aside>
                 </div>
             </section>
+
+            <!-- ================= 艺术字 ================= -->
+            <section class="tab-content" id="text-tab">
+                <div class="layout">
+                    <div class="stack">
+                        <section class="card">
+                            <div class="card-head">
+                                <h2>文字</h2>
+                                <span class="hint">逐字渲染 → 量墨迹框 → 紧凑排布居中；白字黑底，置位 = 亮</span>
+                            </div>
+
+                            <div class="export-grid">
+                                <div class="field-col">
+                                    <label class="field-label" for="text-content">内容</label>
+                                    <input type="text" id="text-content" class="export-input" value="艺术字" maxlength="24">
+                                </div>
+                                <div class="field-col">
+                                    <label class="field-label" for="text-height">字高</label>
+                                    <input type="number" id="text-height" class="export-input" value="24" min="8" max="256">
+                                </div>
+                                <div class="field-col">
+                                    <label class="field-label" for="text-font">字体</label>
+                                    <select id="text-font" class="export-input">
+                                        <option value='"Microsoft YaHei", "PingFang SC", sans-serif'>微软雅黑 / 苹方</option>
+                                        <option value='SimHei, "Heiti SC", sans-serif'>黑体</option>
+                                        <option value='SimSun, "Songti SC", serif'>宋体</option>
+                                        <option value='Consolas, "SF Mono", monospace'>等宽</option>
+                                    </select>
+                                </div>
+                                <div class="field-col">
+                                    <label class="field-label" for="text-gap">字距（0=自动）</label>
+                                    <input type="number" id="text-gap" class="export-input" value="0" min="0" max="64">
+                                </div>
+                            </div>
+
+                            <div class="field">
+                                <label for="text-threshold">阈值</label>
+                                <div class="control">
+                                    <input type="range" id="text-threshold" min="0" max="255" value="128">
+                                    <span class="value value-accent" id="text-threshold-value">128</span>
+                                </div>
+                            </div>
+
+                            <div class="action-row">
+                                <label class="check">
+                                    <input type="checkbox" id="text-invert">
+                                    <span>反色（黑字白底）</span>
+                                </label>
+                                <span id="text-size-label" class="stats" aria-live="polite"></span>
+                            </div>
+                        </section>
+                    </div>
+
+                    <aside class="stack">
+                        <section class="card">
+                            <div class="card-head">
+                                <h2>预览</h2>
+                                <span class="hint">左：超采样渲染源　右：二值化结果</span>
+                            </div>
+                            <div class="preview-container">
+                                <div class="canvas-frame">
+                                    <span class="canvas-label">渲染</span>
+                                    <canvas id="text-source-preview" class="preview-canvas"></canvas>
+                                    <span id="text-empty" class="canvas-empty">输入文字后自动渲染</span>
+                                </div>
+                                <div class="canvas-frame">
+                                    <span class="canvas-label">1bpp</span>
+                                    <canvas id="text-preview" class="preview-canvas"></canvas>
+                                </div>
+                            </div>
+                        </section>
+                    </aside>
+                </div>
+            </section>
+
         </main>
 
         <!-- ================= 导出 ================= -->

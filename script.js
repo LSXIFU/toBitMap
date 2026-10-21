@@ -46,6 +46,13 @@ const modeStates = {
         selectionStart: { x: 0, y: 0 },
         selectionEnd: { x: 0, y: 0 }
     },
+    text: {
+        fileName: 'text',
+        arrayName: 'text_bits',
+        widthVar: 'WIDTH',
+        heightVar: 'HEIGHT',
+        resultCode: ''
+    },
     draw: {
         fileName: 'drawing',
         arrayName: 'image_bits',
@@ -796,6 +803,13 @@ function init() {
     setupTabs();
     setupEventListeners();
     setupDrawCanvas();
+    setupTextLayer();
+}
+
+// 首屏给个默认样张，不然艺术字页是空的
+function setupTextLayer() {
+    if (!getElement('text-content')) return;
+    processTextTab();
 }
 
 function getElement(id) {
@@ -2475,6 +2489,212 @@ function updateSelectionBox(mode) {
     }
 }
 
+
+// ===== 艺术字（文字层）=====
+// 采样方式的依据（实测，探针见 docs/DESIGN_quality.md 附录）：
+// · 直接以目标字号 fillText 会被 hinting 扭形：16px「术」与 16× 参考的 IoU 只有 0.36，t±16 翻转率 14%；
+// · 超采样后面积平均把 IoU 拉到 0.91~1.00、翻转率降到 3~8%；
+// · 倍率按目标尺寸选：≤32px 用 8×（亚像素占比大），更大的用 4×（8× 只剩 <1% 收益，纯烧时间）；
+// · 反锐化默认关：它能把翻转率再压到 1~4%，但 16px 汉字 IoU 从 0.94 掉到 0.82 —— 用保真换稳健，留给用户开。
+const TEXT_LIMITS = { minHeight: 8, maxHeight: 256, maxChars: 24 };
+
+function pickTextSupersample(height) {
+    return height <= 32 ? 8 : 4;
+}
+
+// 单字：S 倍渲染 → 量墨迹框 → 裁出 → 只按超采样倍率缩回（**不**做墨迹高度归一化）。
+// 为什么不做归一化：按墨迹高度拉伸会让「口」这种矮字被放大、「日」被缩小，
+// 同一串字里笔画粗细就不一致了。按字框（em）归一化 = 所有字共用同一设计尺度。
+// 记录 ascent/descent 是为了按基线对齐（裁 bbox 之后各自的上边缘并不在同一条线上）。
+function renderGlyphCanvas(char, height, fontStack) {
+    const scale = pickTextSupersample(height);
+    const srcSize = Math.max(8, height * scale);
+    const pad = Math.ceil(srcSize * 0.4);
+    const big = document.createElement('canvas');
+    big.width = srcSize + pad * 2;
+    big.height = srcSize + pad * 2;
+
+    const bctx = big.getContext('2d', { willReadFrequently: true });
+    bctx.fillStyle = '#000';
+    bctx.fillRect(0, 0, big.width, big.height);
+    bctx.fillStyle = '#fff';
+    bctx.font = `400 ${srcSize}px ${fontStack}`;
+    bctx.textBaseline = 'alphabetic';
+    bctx.textAlign = 'left';
+    const baselineY = big.height - pad;
+    bctx.fillText(char, pad, baselineY);
+
+    // bbox 判据用「亮于 40」：把抗锯齿边缘也算进墨迹，否则细笔画会被裁掉一列
+    const data = bctx.getImageData(0, 0, big.width, big.height).data;
+    let minX = big.width, minY = big.height, maxX = -1, maxY = -1;
+    for (let y = 0; y < big.height; y++) {
+        for (let x = 0; x < big.width; x++) {
+            if (data[(y * big.width + x) * 4] > 40) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    if (maxX < 0) return null;
+
+    const boxWidth = maxX - minX + 1;
+    const boxHeight = maxY - minY + 1;
+    const width = Math.max(1, Math.round(boxWidth / scale));
+
+    // 先把 ascent / descent 各自取整，再用它们之和定字形画布高度：
+    // 这样墨迹上下沿都落在整数格线上，混排时下沿能严格对齐基线。
+    // （若直接 round(boxHeight/scale)，每个字各自舍入会让下沿抖动 ±1px，
+    //   一串「口A」就会出现一高一低。）
+    const intAscent = Math.max(0, Math.round((baselineY - minY) / scale));
+    const intDescent = Math.max(0, Math.round((maxY + 1 - baselineY) / scale));
+    const glyphHeight = Math.max(1, intAscent + intDescent);
+
+    const glyph = document.createElement('canvas');
+    glyph.width = width;
+    glyph.height = glyphHeight;
+    const gctx = glyph.getContext('2d', { willReadFrequently: true });
+    gctx.fillStyle = '#000';
+    gctx.fillRect(0, 0, width, glyphHeight);
+    gctx.imageSmoothingEnabled = true;
+    gctx.imageSmoothingQuality = 'high';
+    gctx.drawImage(big, minX, minY, boxWidth, boxHeight, 0, 0, width, glyphHeight);
+
+    return {
+        canvas: glyph,
+        width: width,
+        ascent: intAscent,
+        descent: intDescent
+    };
+}
+
+// 整串：按基线对齐 → 紧凑排布 → 整幅居中；宽度向上对齐到 8 的倍数（四种布局都能整字节落位）
+function renderTextLayer(text, options) {
+    const opts = options || {};
+    const fontSize = Math.max(TEXT_LIMITS.minHeight, Math.min(TEXT_LIMITS.maxHeight, parseInt(opts.height, 10) || 24));
+    const fontStack = opts.font || '"Microsoft YaHei", sans-serif';
+    const chars = Array.from(String(text == null ? '' : text)).slice(0, TEXT_LIMITS.maxChars);
+    if (chars.length === 0) return null;
+
+    const gap = opts.gap > 0 ? Math.min(64, Math.floor(opts.gap)) : Math.max(1, Math.round(fontSize / 16));
+    const glyphs = [];
+    for (const ch of chars) {
+        if (ch === ' ' || ch === '\u3000') {
+            glyphs.push({ canvas: null, width: Math.max(2, Math.round(fontSize * 0.35)), ascent: 0, descent: 0 });
+            continue;
+        }
+        const glyph = renderGlyphCanvas(ch, fontSize, fontStack);
+        if (glyph) glyphs.push(glyph);
+    }
+    if (glyphs.length === 0) return null;
+
+    // 基线对齐：整幅高度 = 最大上延 + 最大下延（结果通常略小于字号，因为墨迹不含字框留白）
+    let ascentMax = 0, descentMax = 0;
+    for (const glyph of glyphs) {
+        if (glyph.canvas) {
+            ascentMax = Math.max(ascentMax, glyph.ascent);
+            descentMax = Math.max(descentMax, glyph.descent);
+        }
+    }
+    const height = Math.max(1, ascentMax + descentMax);
+
+    const contentWidth = glyphs.reduce((sum, glyph) => sum + glyph.width, 0) + gap * (glyphs.length - 1);
+    const alignedWidth = Math.max(8, Math.ceil(contentWidth / 8) * 8);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = alignedWidth;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, alignedWidth, height);
+
+    let cursor = Math.floor((alignedWidth - contentWidth) / 2);
+    for (const glyph of glyphs) {
+        if (glyph.canvas) {
+            const y = ascentMax - glyph.ascent;
+            ctx.drawImage(glyph.canvas, cursor, y);
+        }
+        cursor += glyph.width + gap;
+    }
+
+    return {
+        canvas: canvas,
+        width: alignedWidth,
+        height: height,
+        contentWidth: contentWidth,
+        fontSize: fontSize,
+        gap: gap,
+        glyphCount: glyphs.length
+    };
+}
+
+function readTextConfig() {
+    return {
+        text: getElement('text-content').value,
+        height: parseInt(getElement('text-height').value, 10) || 24,
+        font: getElement('text-font').value,
+        gap: parseInt(getElement('text-gap').value, 10) || 0,
+        threshold: parseInt(getElement('text-threshold').value, 10),
+        invert: getElement('text-invert').checked
+    };
+}
+
+let lastTextRender = null;
+
+// 文字层自己产出渲染源，再走与图片/手绘完全相同的二值化 -> 布局 -> 编码链路；
+// 区别只在于 1:1 取源（不再重采样），否则超采样的成果会被第二次缩放抹掉。
+function processTextTab() {
+    const config = readTextConfig();
+    const rendered = renderTextLayer(config.text, config);
+    const empty = getElement('text-empty');
+
+    if (!rendered) {
+        if (empty) empty.style.display = 'inline';
+        getElement('text-size-label').textContent = '';
+        return;
+    }
+    if (empty) empty.style.display = 'none';
+    lastTextRender = { config: config, rendered: rendered };
+
+    const width = rendered.width;
+    const height = rendered.height;
+    getElement('text-size-label').textContent =
+        `${width}×${height} · 字号 ${rendered.fontSize} · 内容宽 ${rendered.contentWidth} · 字距 ${rendered.gap} · ${rendered.glyphCount} 字`;
+
+    const previewScale = Math.max(1, Math.min(AppConfig.maxPreviewZoom, Math.floor(480 / Math.max(width, height))));
+
+    const sourceCanvas = getElement('text-source-preview');
+    sourceCanvas.width = width * previewScale;
+    sourceCanvas.height = height * previewScale;
+    const srcCtx = sourceCanvas.getContext('2d');
+    srcCtx.imageSmoothingEnabled = false;
+    srcCtx.drawImage(rendered.canvas, 0, 0, width * previewScale, height * previewScale);
+
+    const processed = canvasPool.withCanvas(width, height, tempCanvasItem => {
+        const tempCtx = tempCanvasItem.ctx;
+        tempCtx.clearRect(0, 0, width, height);
+        tempCtx.drawImage(rendered.canvas, 0, 0);
+
+        const imageData = tempCtx.getImageData(0, 0, width, height);
+        const result = processBinaryImage(
+            imageData, 'average', config.threshold, DEFAULT_RGB_THRESHOLDS, config.invert, 'none'
+        );
+
+        tempCtx.putImageData(result, 0, 0);
+        const previewCanvas = getElement('text-preview');
+        previewCanvas.width = width * previewScale;
+        previewCanvas.height = height * previewScale;
+        const previewCtx = previewCanvas.getContext('2d');
+        previewCtx.imageSmoothingEnabled = false;
+        previewCtx.drawImage(tempCanvasItem.canvas, 0, 0, width * previewScale, height * previewScale);
+
+        return result;
+    });
+
+    scheduleCodeGeneration(processed, width, height);
+}
+
 function setupEventListeners() {
     getElement('image-upload').addEventListener('change', handleImageUpload);
     
@@ -2589,6 +2809,22 @@ function setupEventListeners() {
     getElement('draw-height').addEventListener('input', resizeDrawCanvas);
     
     getElement('draw-invert-checkbox').addEventListener('change', processDrawCanvas);
+
+    // 文字层：输入即渲染（节流），参数变更立即重排
+    let textTimer = null;
+    const scheduleTextRender = () => {
+        if (textTimer) clearTimeout(textTimer);
+        textTimer = setTimeout(processTextTab, 120);
+    };
+    getElement('text-content').addEventListener('input', scheduleTextRender);
+    getElement('text-height').addEventListener('input', scheduleTextRender);
+    getElement('text-gap').addEventListener('input', scheduleTextRender);
+    getElement('text-font').addEventListener('change', processTextTab);
+    getElement('text-invert').addEventListener('change', processTextTab);
+    getElement('text-threshold').addEventListener('input', function(e) {
+        getElement('text-threshold-value').textContent = e.target.value;
+        processTextTab();
+    });
     
     setupImportPanel();
     setupCaptureMode();
@@ -2626,6 +2862,8 @@ function refreshResult() {
         processVideoFrame();
     } else if (activeMode === 'draw') {
         processDrawCanvas();
+    } else if (activeMode === 'text') {
+        processTextTab();
     }
 }
 
@@ -3014,6 +3252,26 @@ function exportRawImage() {
             const raw = tempCtx.getImageData(0, 0, width, height);
             return processBinaryImage(
                 raw, thresholdType, threshold, readRgbThresholds(''), invert, readDitherMode('')
+            );
+        });
+    } else if (activeMode === 'text') {
+        const config = readTextConfig();
+        const rendered = renderTextLayer(config.text, config);
+        if (!rendered) {
+            alert('先输入文字');
+            return;
+        }
+        width = rendered.width;
+        height = rendered.height;
+
+        imageData = canvasPool.withCanvas(width, height, tempCanvasItem => {
+            const tempCtx = tempCanvasItem.ctx;
+            tempCtx.clearRect(0, 0, width, height);
+            tempCtx.drawImage(rendered.canvas, 0, 0);
+
+            const raw = tempCtx.getImageData(0, 0, width, height);
+            return processBinaryImage(
+                raw, 'average', config.threshold, DEFAULT_RGB_THRESHOLDS, config.invert, 'none'
             );
         });
     } else if (activeMode === 'draw') {
@@ -3537,6 +3795,134 @@ function runBitmapSelfTest() {
 
 // 控制台里跑一次：window.bitmapSelfTest()
 
+// 文字层自检（浏览器限定：需要 canvas + 字体，Node 侧没有 font 引擎）
+// 对照物是「排版不变量」而不是某个具体字形的像素——字形随系统字体变，不变量不该变。
+function runTextLayerSelfTest() {
+    const cases = [];
+    const failures = [];
+    const record = (name, ok, detail) => {
+        cases.push(name);
+        if (!ok) failures.push(detail === undefined ? name : name + ' :: ' + JSON.stringify(detail));
+    };
+
+    const renderBinary = (text, options, threshold, invert) => {
+        const rendered = renderTextLayer(text, options);
+        if (!rendered) return null;
+        const result = canvasPool.withCanvas(rendered.width, rendered.height, item => {
+            const ctx = item.ctx;
+            ctx.clearRect(0, 0, rendered.width, rendered.height);
+            ctx.drawImage(rendered.canvas, 0, 0);
+            const raw = ctx.getImageData(0, 0, rendered.width, rendered.height);
+            return processBinaryImage(raw, 'average', threshold, DEFAULT_RGB_THRESHOLDS, invert, 'none');
+        });
+        let ink = 0;
+        const columnInk = new Array(rendered.width).fill(0);
+        for (let y = 0; y < rendered.height; y++) {
+            for (let x = 0; x < rendered.width; x++) {
+                if (result.data[(y * rendered.width + x) * 4] > 128) {
+                    ink++;
+                    columnInk[x]++;
+                }
+            }
+        }
+        return { rendered, result, ink, columnInk, width: rendered.width, height: rendered.height };
+    };
+
+    const base = renderBinary('艺术字', { height: 24 }, 128, false);
+    record('文字层：能渲染出墨迹', !!base && base.ink > 0, base && base.ink);
+    if (!base) return { pass: false, cases, failures };
+
+    record('文字层：宽度对齐到 8', base.width % 8 === 0, base.width);
+    record('文字层：高度不超过字号', base.height <= base.rendered.fontSize + 1,
+           [base.height, base.rendered.fontSize]);
+    record('文字层：字号即渲染字号', renderTextLayer('字', { height: 32 }).fontSize === 32);
+
+    // 字间至少一列全零：数全零列游程
+    let runs = 0, run = 0;
+    for (let x = 0; x < base.width; x++) {
+        if (base.columnInk[x] === 0) run++;
+        else { if (run > 0) runs++; run = 0; }
+    }
+    if (run > 0) runs++;
+    record('文字层：字间有空白列', runs >= 2, { runs, gap: base.rendered.gap });
+
+    // 基线对齐：墨迹下沿之差必须等于两个字 descent 之差。
+    // 不能断言"下沿齐平"——雅黑里「口」本身就比基线低 2px（字体设计如此），
+    // 齐平才是错的。真正要保证的是：同一个基线被所有字一致地引用。
+    const mixed = renderBinary('口A', { height: 24 }, 128, false);
+    const bottomRuns = (() => {
+        const cols = [];
+        for (let x = 0; x < mixed.width; x++) {
+            let has = false;
+            for (let y = 0; y < mixed.height; y++) {
+                if (mixed.result.data[(y * mixed.width + x) * 4] > 128) { has = true; break; }
+            }
+            cols.push(has);
+        }
+        const runs = [];
+        let start = -1;
+        for (let x = 0; x < cols.length; x++) {
+            if (cols[x] && start < 0) start = x;
+            if (!cols[x] && start >= 0) { runs.push([start, x - 1]); start = -1; }
+        }
+        if (start >= 0) runs.push([start, cols.length - 1]);
+        return runs.map(pair => {
+            let bottom = -1;
+            for (let y = 0; y < mixed.height; y++) {
+                for (let x = pair[0]; x <= pair[1]; x++) {
+                    if (mixed.result.data[(y * mixed.width + x) * 4] > 128) bottom = Math.max(bottom, y);
+                }
+            }
+            return { x0: pair[0], x1: pair[1], bottom: bottom };
+        });
+    })();
+
+    if (bottomRuns.length === 2) {
+        const kou = renderGlyphCanvas('口', 24, '"Microsoft YaHei", "PingFang SC", sans-serif');
+        const capA = renderGlyphCanvas('A', 24, '"Microsoft YaHei", "PingFang SC", sans-serif');
+        const expected = kou.descent - capA.descent;
+        const actual = bottomRuns[0].bottom - bottomRuns[1].bottom;
+        record('文字层：基线一致（下沿差 = descent 差）', actual === expected,
+               { actual: actual, expected: expected, 口: bottomRuns[0], A: bottomRuns[1] });
+    } else {
+        record('文字层：基线一致（下沿差 = descent 差）', false, { runs: bottomRuns.length });
+    }
+
+    // 反色是互补
+    const inverted = renderBinary('艺术字', { height: 24 }, 128, true);
+    record('文字层：反色互补', Math.abs(base.ink + inverted.ink - base.width * base.height) <= 2,
+           { ink: base.ink, inkInverted: inverted.ink, total: base.width * base.height });
+
+    // 阈值单调：白字黑底下抬高阈值只会少墨
+    const tight = renderBinary('艺术字', { height: 24 }, 200, false);
+    const loose = renderBinary('艺术字', { height: 24 }, 80, false);
+    record('文字层：阈值单调（高阈值墨量更少）', tight.ink < base.ink && base.ink < loose.ink,
+           { at200: tight.ink, at128: base.ink, at80: loose.ink });
+
+    // 四种布局都能整字节落位
+    for (const layoutId of Object.keys(BITMAP_LAYOUTS)) {
+        const bytes = encodeBitmap(base.result, layoutId);
+        record('文字层：' + layoutId + ' 字节数', bytes.length === layoutBufferSize(base.width, base.height, layoutId),
+               { got: bytes.length, want: layoutBufferSize(base.width, base.height, layoutId) });
+    }
+
+    // 渲染确定性：同输入两次必须同一字节流（否则导出的资产不可复现）
+    const again = renderBinary('艺术字', { height: 24 }, 128, false);
+    const a = encodeBitmap(base.result, 'row_msb');
+    const b = encodeBitmap(again.result, 'row_msb');
+    let identical = a.length === b.length;
+    if (identical) {
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { identical = false; break; }
+    }
+    record('文字层：渲染确定性', identical, { bytes: a.length });
+
+    return { pass: failures.length === 0, cases: cases.length, failures: failures, cases_list: cases };
+}
+
+window.textLayerSelfTest = runTextLayerSelfTest;
+
+
+
 // ===== 对外 API（页面 / node / agent 共用同一份实现）=====
 // 只暴露纯计算入口：不读 DOM、不改 UI 状态，因此能被 cli.mjs 用 vm 直接加载。
 // 加新输出格式时先让这里能调到，再谈 UI。
@@ -3567,7 +3953,7 @@ function requireLayoutId(layoutId) {
 }
 
 const toBitMapApi = {
-    version: '1.6',
+    version: '1.7',
 
     // 可用布局（给 agent 自描述用）
     layouts() {
