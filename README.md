@@ -26,6 +26,7 @@
 - 阈值类型：RGB 平均 / 亮度（感知亮度）/ RGB 独立区间
 - **自动阈值**：Otsu 按当前图的直方图取分割点
 - **抖动**：Floyd–Steinberg 误差扩散、Bayer 4×4、Bayer 8×8（保色调，灰阶过渡不生硬）
+- **降采样**：先夹到目标 8 倍以内，再逐级按 2:1 平均（等价 box 预滤波）—— 关掉平滑的一次性最近邻会把 2px 细线整根吃掉
 - 反转黑白
 
 ### 输出格式（同一张图，四种落位）
@@ -73,7 +74,7 @@ npx serve .
 
 关键函数：`binarizeImageData()`（阈值 + 抖动）、`packBitmapBytes()`（唯一二值化 → 权威缓冲）、
 `transferBits()`（唯一布局搬运，encode/decode 共用同一组位置公式）、`encodeBitmap()` / `decodeBitmap()`、
-`formatCHeader()`（唯一 C 源码格式化）、`runBitmapSelfTest()`（回归预言机）。
+`formatCHeader()`（唯一 C 源码格式化）、`drawSourceDownscaled()`（唯一取源+降采样入口）、`runBitmapSelfTest()`（回归预言机）。
 
 新增输出格式只需在 `BITMAP_LAYOUTS` 里加一项（`axis` + `bitOrder`），不要另写循环。
 
@@ -90,7 +91,7 @@ npx serve .
 - **原作者**：栢爅
 - **GitHub**：[LSXIFU](https://github.com/LSXIFU)
 - **哔哩哔哩UID**：402603542
-- **版本**：1.3
+- **版本**：1.4
 - **制作工具**：Trae IDE AI 工具
 - **首版发布**：2026/3/8
 
