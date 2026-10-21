@@ -1068,8 +1068,49 @@ function generateCode(imageData, width, height) {
     
     const code = formatCHeader(packBitmapBytes(imageData), options);
     
-    modeStates[activeMode].resultCode = code;
-    getElement('result-code').textContent = code;
+    // 内容没变就不碰 DOM：滑杆拖动时每帧重写整段文本会强制重排
+    if (code !== modeStates[activeMode].resultCode) {
+        modeStates[activeMode].resultCode = code;
+        getElement('result-code').textContent = code;
+    }
+    
+    updateResultStats(width, height);
+}
+
+let pendingCodeTimer = null;
+let lastRender = null;
+
+// 预览是每帧刷新的，代码文本没必要跟着每帧重算：攒 60ms 再生成
+function scheduleCodeGeneration(imageData, width, height) {
+    lastRender = { imageData: imageData, width: width, height: height };
+    
+    if (pendingCodeTimer) clearTimeout(pendingCodeTimer);
+    pendingCodeTimer = setTimeout(() => {
+        pendingCodeTimer = null;
+        generateCode(imageData, width, height);
+    }, 60);
+}
+
+// 导出前必须先落盘，否则可能导出去抖期间的旧结果
+function refreshCodeNow() {
+    if (pendingCodeTimer) {
+        clearTimeout(pendingCodeTimer);
+        pendingCodeTimer = null;
+    }
+    if (lastRender) {
+        generateCode(lastRender.imageData, lastRender.width, lastRender.height);
+    }
+}
+
+function updateResultStats(width, height) {
+    const stats = getElement('result-stats');
+    if (!stats) return;
+    
+    const bytesPerRow = Math.ceil(width / 8);
+    const totalBytes = bytesPerRow * height;
+    const sourceKB = (modeStates[activeMode].resultCode.length / 1024).toFixed(1);
+    
+    stats.textContent = `${width}×${height} · ${bytesPerRow} B/行 · 共 ${totalBytes} B · 源码 ${sourceKB} KB · 行优先 MSB`;
 }
 
 function handleImageUpload(e) {
@@ -1391,7 +1432,7 @@ function processImage() {
         return processed;
     });
     
-    generateCode(processedImageData, width, height);
+    scheduleCodeGeneration(processedImageData, width, height);
 }
 
 function processVideo() {
@@ -1450,7 +1491,7 @@ function processVideoFrame() {
             return processed;
         });
         
-        generateCode(processedImageData, width, height);
+        scheduleCodeGeneration(processedImageData, width, height);
     }
 }
 
@@ -1625,7 +1666,7 @@ function processDrawCanvas() {
         return pixels;
     });
     
-    generateCode(imageData, width, height);
+    scheduleCodeGeneration(imageData, width, height);
 }
 
 function showBatchImage(index) {
@@ -2281,6 +2322,8 @@ function setupEventListeners() {
     
     getElement('frame-rate').addEventListener('change', processVideo);
     
+    getElement('reverse-bits').addEventListener('change', refreshCodeNow);
+    
     getElement('export-btn').addEventListener('click', exportResult);
     
     getElement('export-raw-btn').addEventListener('click', exportRawResult);
@@ -2375,6 +2418,7 @@ function exportResult() {
 }
 
 function exportImage() {
+    refreshCodeNow();
     const code = modeStates[activeMode].resultCode;
     if (!code) {
         alert('没有可导出的内容');
