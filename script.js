@@ -806,7 +806,7 @@ function init() {
     setupTextLayer();
 }
 
-// 首屏给个默认样张，不然艺术字页是空的
+// 首屏给个默认样张，不然文字取模页是空的
 function setupTextLayer() {
     if (!getElement('text-content')) return;
     processTextTab();
@@ -2490,7 +2490,7 @@ function updateSelectionBox(mode) {
 }
 
 
-// ===== 艺术字（文字层）=====
+// ===== 文字取模（文字层）=====
 // 采样方式的依据（实测，探针见 docs/DESIGN_quality.md 附录）：
 // · 直接以目标字号 fillText 会被 hinting 扭形：16px「术」与 16× 参考的 IoU 只有 0.36，t±16 翻转率 14%；
 // · 超采样后面积平均把 IoU 拉到 0.91~1.00、翻转率降到 3~8%；

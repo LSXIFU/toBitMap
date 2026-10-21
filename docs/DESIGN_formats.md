@@ -102,7 +102,7 @@ decode(Uint8Array, fmt, W, H) -> B
 ## 6. 明确不做（本批）
 
 - 字库/多 glyph 数据结构（第二阶段单独设计，避免撑歪单图模型）
-- 艺术字文本渲染（属输入生成器，另走分支）
+- 文字取模渲染（属输入生成器，另走分支）
 - RGB565 / 灰阶 / `lv_img_dsc_t` / ESC-POS（本批只做 1bpp 布局变体）
 - `window.toBitMap` API 与 CLI（等格式稳定后冻结接口，届时 core 走 IIFE 挂 globalThis + node `vm` shim，保住双击 `file://` 可用）
 - `.raw` 头部格式字段（改了就不兼容，收益不足）
