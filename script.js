@@ -851,18 +851,17 @@ function setupOriginalRatioButton(buttonId, widthInputId, heightInputId, aspectR
             const baseSize = Math.max(currentWidth, currentHeight, AppConfig.defaultSize);
             let newWidth, newHeight;
             
-            if (originalRatio > 1) {
+            // 长边保持 baseSize，另一边按原图比例推导
+            if (originalRatio >= 1) {
                 newWidth = baseSize;
                 newHeight = Math.round(baseSize / originalRatio);
-                newWidth = Math.round(newHeight * originalRatio);
             } else {
                 newHeight = baseSize;
-                newWidth = Math.round(baseHeight * originalRatio);
-                newHeight = Math.round(newWidth / originalRatio);
+                newWidth = Math.round(baseSize * originalRatio);
             }
             
-            newWidth = Math.max(AppConfig.minSize, newWidth);
-            newHeight = Math.max(AppConfig.minSize, newHeight);
+            newWidth = Math.max(1, newWidth);
+            newHeight = Math.max(1, newHeight);
             
             aspectRatioObj.isUpdating = true;
             getElement(widthInputId).value = newWidth;
