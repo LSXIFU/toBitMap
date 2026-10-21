@@ -12,7 +12,6 @@ const AppConfig = {
     maxPreviewSize: 400,
     maxCanvasSize: 400,
     defaultSize: 32,
-    minSize: 16,
     canvasPoolSize: 4,
     workerEnabled: true
 };
@@ -1462,7 +1461,11 @@ function processVideoFrame() {
     
     const frameInterval = 1 / frameRate;
     
-    if (lastFrameTime === 0 || currentTime - lastFrameTime >= frameInterval) {
+    // 限频只在播放时才有意义：暂停状态下 lastFrameTime 等于 currentTime，
+    // 用户刚改的框选/阈值会被闸门挡掉，预览一直停在旧画面
+    const throttled = !video.paused && lastFrameTime !== 0;
+    
+    if (!throttled || currentTime - lastFrameTime >= frameInterval) {
         lastFrameTime = currentTime;
         
         const canvas = getElement('video-frame-preview');
